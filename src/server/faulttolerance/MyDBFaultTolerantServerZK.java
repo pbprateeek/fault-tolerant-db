@@ -39,7 +39,7 @@ public class MyDBFaultTolerantServerZK extends server.MyDBSingleServer {
 	public static final int SLEEP = 1000;
 
 	/**
-	 * Set this to true if you want all tables drpped at the end of each run
+	 * Set this to true if you want all tables dropped at the end of each run
 	 * of tests by GraderFaultTolerance.
 	 */
 	public static final boolean DROP_TABLES_AFTER_TESTS=true;
