@@ -1,0 +1,39 @@
+Run 1 instance of Zookeeper with address and client port- localhost:2181
+
+Assumptions:
+
+server0 - leader node
+
+server1, server2 - replica nodes
+
+1) Servers to connect to the Zookeeper with the below code in constructor
+
+zookeeper = new ZooKeeper(ZOOKEEPER_HOST, 3000, new Watcher() {
+				public void process(WatchedEvent we) {
+					if (we.getState() == Watcher.Event.KeeperState.SyncConnected) {
+						System.out.println("Connected to ZooKeeper");
+					}
+				}
+			});
+
+
+
+2) create znode per server, path = server_state/myID and store json object of states (REQUEST, PROPOSAL, ACKNOWLED)
+
+3) Configure watcher to watch EventType.NodeDeleted to detect node crashes
+
+4) If node crashes, invoke failureAndCrashRecovery() method. It will forward the state to forwardStateToHandler() method
+
+failureAndCrashRecovery() -> 1) getstate == empty --> no action needed
+
+		  2) getState != empty --> getType(), forwardStateToHandler() --> Based on Type --> handleMessageFromServer()
+
+
+Tasks to do in Watcher -- If leader deleted, choose new leader, update leader variable and update nodeConfig
+			  else if replica deleted, then update nodeConfig
+
+
+Failures --> replica failure, leader failure (we have to choose a new leader and update leader variable)
+
+
+TODO: What about CheckpointRecovery enum, do we need this? If we are cleaning the states after every successful writes?
