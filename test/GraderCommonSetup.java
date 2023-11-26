@@ -69,7 +69,7 @@ protected static String CONFIG_FILE;
 protected static final int NUM_REQS = 100;
 
 //////////////////// sleep macros
-protected static final int MAX_SLEEP = 1000;
+protected static final int MAX_SLEEP = 2000;
 protected static final int SLEEP_RATIO = 10;
 // ZK or other implementations can set higher sleep if needed, but it
 // shouldn't be needed.
