@@ -18,6 +18,8 @@ import server.ReplicatedServer;
 
 import java.io.IOException;
 import java.net.InetSocketAddress;
+import java.util.Collections;
+import java.util.List;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.CountDownLatch;
@@ -95,6 +97,13 @@ public class MyDBFaultTolerantServerZK extends server.MyDBSingleServer {
 
 	private ZooKeeper zookeeper;
 	private static final String ZOOKEEPER_HOST = "localhost:2181";
+	private final String electionPath = "/election";
+
+	boolean isLeader = false;
+
+	// Create a unique path for this server
+	String statePath = "/serverStates/";
+
 
 	/**
 	 * @param nodeConfig Server name/address configuration information read
@@ -123,6 +132,7 @@ public class MyDBFaultTolerantServerZK extends server.MyDBSingleServer {
 			break;
 		}
 		this.myID = myID;
+		this.statePath = "/serverStates/" + myID;
 
 		this.serverMessenger =  new
 				MessageNIOTransport<String, String>(myID, nodeConfig,
@@ -139,46 +149,115 @@ public class MyDBFaultTolerantServerZK extends server.MyDBSingleServer {
 				.myID, this.clientMessenger.getListeningSocketAddress()});
 
 		try {
-			zookeeper = new ZooKeeper(ZOOKEEPER_HOST, 3000, new Watcher() {
+			zookeeper = new ZooKeeper(ZOOKEEPER_HOST, 5000, new Watcher() {
 				public void process(WatchedEvent we) {
 					if (we.getState() == Watcher.Event.KeeperState.SyncConnected) {
 						System.out.println("Connected to ZooKeeper");
 					}
 				}
 			});
-			setupWatcher();
 		} catch (Exception e) {
 			e.printStackTrace();
 		}
 
-		// TODO: Make sure to do any needed crash recovery here.
+		try {
+			ensureServerStatesPathExists();
+		} catch (KeeperException | InterruptedException e) {
+			e.printStackTrace();
+			// Handle exception
+		}
+
+		try {
+			runForLeader();
+		} catch (KeeperException | InterruptedException e) {
+			throw new RuntimeException(e);
+		}
 	}
 
-	private void setupWatcher() {
-		String path = "/serverState/" + myID;
-		try {
-			zookeeper.exists(path, watchedEvent -> {
+	public void runForLeader() throws KeeperException, InterruptedException {
+    // Ensure the election path exists
+    Stat stat = zookeeper.exists(electionPath, false);
+    if (stat == null) {
+        // Create the election path if it does not exist
+        zookeeper.create(electionPath, new byte[0], ZooDefs.Ids.OPEN_ACL_UNSAFE, CreateMode.PERSISTENT);
+    }
+
+		String path = zookeeper.create(electionPath + "/server-", myID.getBytes(),
+				ZooDefs.Ids.OPEN_ACL_UNSAFE,
+				CreateMode.EPHEMERAL_SEQUENTIAL);
+
+		List<String> nodes = zookeeper.getChildren(electionPath, false);
+		Collections.sort(nodes);
+
+		int index = nodes.indexOf(path.substring(electionPath.length() + 1));
+		if (index == 0) {
+			// This server is the leader
+			isLeader = true;
+			leader = myID;
+			handleNewLeader();
+		} else {
+			// This server is not the leader, watch the node with a smaller sequence number
+			String nodeToWatch = nodes.get(index - 1);
+			zookeeper.exists(electionPath + "/" + nodeToWatch, watchedEvent -> {
 				if (watchedEvent.getType() == Watcher.Event.EventType.NodeDeleted) {
-					failureAndCrashRecovery();
+					// The node we are watching is deleted, try to become the leader again
+					try {
+						runForLeader();
+                } catch (KeeperException | InterruptedException e) {
+						throw new RuntimeException(e);
+					}
 				}
 			});
-		} catch (Exception e) {
-			e.printStackTrace();
 		}
 	}
 
-	private void failureAndCrashRecovery() {
-		String path = "/serverState/" + myID;
+	private void handleNewLeader() {
+		retrieveAndProcessStateLogs();
+	}
+
+	public void retrieveAndProcessStateLogs() {
 		try {
-			byte[] data = zookeeper.getData(path, false, null);
-			JSONObject state = new JSONObject(new String(data));
-			forwardStateToHandler(state);
-		} catch (Exception e) {
+			List<String> serverIds = zookeeper.getChildren("/serverStates", false);
+
+			for (String serverId : serverIds) {
+				List<String> stateTypes = zookeeper.getChildren("/serverStates/" + serverId, false);
+
+				for (String stateType : stateTypes) {
+					String statePath = "/serverStates/" + serverId + "/" + stateType;
+					byte[] stateData = zookeeper.getData(statePath, false, null);
+
+					forwardStateToHandler(stateData); // Pass a dummy NIOHeader or relevant header
+				}
+			}
+		} catch (KeeperException.NoNodeException e) {
+			System.out.println("No state logs available in Zookeeper.");
+		} catch (KeeperException | InterruptedException e) {
 			e.printStackTrace();
+		} catch (JSONException e) {
+            throw new RuntimeException(e);
+        }
+    }
+
+	public void ensureServerStatesPathExists() throws KeeperException, InterruptedException {
+		Stat stat = zookeeper.exists("/serverStates", false);
+		if (stat == null) {
+			zookeeper.create("/serverStates", new byte[0], ZooDefs.Ids.OPEN_ACL_UNSAFE, CreateMode.PERSISTENT);
 		}
 	}
 
-	private void forwardStateToHandler(JSONObject state) throws JSONException {
+
+
+
+	private void forwardStateToHandler(byte[] bytes) throws JSONException {
+
+		// deserialize the request
+		JSONObject state = null;
+		try {
+			state = new JSONObject(new String(bytes));
+		} catch (JSONException e) {
+			// TODO Auto-generated catch block
+			e.printStackTrace();
+		}
 		String type = state.getString("type");
 		switch (type) {
 			case "ACKNOWLEDGEMENT":
@@ -226,32 +305,42 @@ public class MyDBFaultTolerantServerZK extends server.MyDBSingleServer {
 		}
 	}
 
-	private void updateZookeeperState(JSONObject state) {
-		String parentPath = "/serverState";
-		String serverPath = parentPath + "/" + myID;
+	private void updateZookeeperState(String stateType, JSONObject json) {
+		String serverStatePath = "/serverStates/" + myID;
+		String statePath = serverStatePath + "/" + stateType;
 
 		try {
-			// Check and create parent path if it does not exist
-			if (zookeeper.exists(parentPath, false) == null) {
-				zookeeper.create(parentPath, new byte[0], ZooDefs.Ids.OPEN_ACL_UNSAFE, CreateMode.PERSISTENT);
-			}
+			// Ensure the parent nodes exist
+			ensurePathExists(serverStatePath);
 
-			// Check if the server-specific path exists
-			Stat serverStat = zookeeper.exists(serverPath, false);
+			byte[] stateData = json.toString().getBytes(); // Convert JSON to byte array
+			Stat stat = zookeeper.exists(statePath, false);
 
-			// Debugging Zookeeper connection, remove the print statement after use
-			long sessionId = zookeeper.getSessionId();
-			System.out.println("Connected ZooKeeper Session ID: " + Long.toHexString(sessionId));
-			if (serverStat == null) {
-				// Create the server node only if it does not exist
-				zookeeper.create(serverPath, state.toString().getBytes(), ZooDefs.Ids.OPEN_ACL_UNSAFE, CreateMode.PERSISTENT);
+			if (stat == null) {
+				zookeeper.create(statePath, stateData, ZooDefs.Ids.OPEN_ACL_UNSAFE, CreateMode.PERSISTENT);
 			} else {
-				// Update the existing server node
-				zookeeper.setData(serverPath, state.toString().getBytes(), zookeeper.exists(serverPath, true).getVersion()); //serverStat.getVersion()
-
+				zookeeper.setData(statePath, stateData, stat.getVersion());
 			}
-		} catch (Exception e) {
+		} catch (KeeperException | InterruptedException e) {
 			e.printStackTrace();
+			// Handle exceptions, possibly retrying the operation
+		}
+	}
+
+	private void ensurePathExists(String path) throws KeeperException, InterruptedException {
+		if (zookeeper.exists(path, false) == null) {
+			String[] pathSegments = path.split("/");
+			StringBuilder currentPath = new StringBuilder();
+
+			// Create each segment if it doesn't exist
+			for (String segment : pathSegments) {
+				if (!segment.isEmpty()) {
+					currentPath.append("/").append(segment);
+					if (zookeeper.exists(currentPath.toString(), false) == null) {
+						zookeeper.create(currentPath.toString(), new byte[0], ZooDefs.Ids.OPEN_ACL_UNSAFE, CreateMode.PERSISTENT);
+					}
+				}
+			}
 		}
 	}
 
@@ -330,10 +419,8 @@ public class MyDBFaultTolerantServerZK extends server.MyDBSingleServer {
 		// check the type of the request
 		try {
 			String type = json.getString(MyDBClient.Keys.TYPE.toString());
-			if (type.equals(MyDBFaultTolerantServerZK.Type.REQUEST.toString())){
-				//Update state in Zookeeper upon receive of REQUEST type
-				updateZookeeperState(json);
-				if(myID.equals(leader)){
+			if (type.equals(MyDBFaultTolerantServerZK.Type.REQUEST.toString())) {
+				if (myID.equals(leader)) {
 
 					// put the request into the queue
 					Long reqId = incrReqNum();
@@ -342,10 +429,10 @@ public class MyDBFaultTolerantServerZK extends server.MyDBSingleServer {
 					log.log(Level.INFO, "{0} put request {1} into the queue.",
 							new Object[]{this.myID, json});
 
-					if(isReadyToSend(expected)){
+					if (isReadyToSend(expected)) {
 						// retrieve the first request in the queue
 						JSONObject proposal = queue.remove(expected);
-						if(proposal != null) {
+						if (proposal != null) {
 							proposal.put(MyDBClient.Keys.TYPE.toString(), MyDBFaultTolerantServerZK.Type.PROPOSAL.toString());
 							enqueue();
 							broadcastRequest(proposal);
@@ -359,9 +446,12 @@ public class MyDBFaultTolerantServerZK extends server.MyDBSingleServer {
 					log.log(Level.SEVERE, "{0} received REQUEST message from {1} which should not be here.",
 							new Object[]{this.myID, header.sndr});
 				}
-			} else if (type.equals(MyDBFaultTolerantServerZK.Type.PROPOSAL.toString())) {
-				//Update state in Zookeeper upon receive of PROPOSAL type
-				updateZookeeperState(json);
+
+				//Update state in Zookeeper upon receive of REQUEST type
+				updateZookeeperState(Type.REQUEST.toString(), json);
+			}
+
+			else if (type.equals(MyDBFaultTolerantServerZK.Type.PROPOSAL.toString())) {
 
 				// execute the query and send back the acknowledgement
 				String query = json.getString(MyDBClient.Keys.REQUEST.toString());
@@ -373,20 +463,21 @@ public class MyDBFaultTolerantServerZK extends server.MyDBSingleServer {
 						.put(MyDBClient.Keys.REQNUM.toString(), reqId)
 						.put(MyDBClient.Keys.TYPE.toString(), MyDBFaultTolerantServerZK.Type.ACKNOWLEDGEMENT.toString());
 				serverMessenger.send(header.sndr, response.toString().getBytes());
+
+				//Update state in Zookeeper upon receive of PROPOSAL type
+				updateZookeeperState(Type.PROPOSAL.toString(), json);
 			} else if (type.equals(MyDBFaultTolerantServerZK.Type.ACKNOWLEDGEMENT.toString())) {
-				//Update state in Zookeeper upon receive of ACKNOWLEDGEMENT type
-				updateZookeeperState(json);
 
 				// only the leader needs to handle acknowledgement
-				if(myID.equals(leader)){
+				if (myID.equals(leader)) {
 					// TODO: leader processes ack here
 					String node = json.getString(MyDBClient.Keys.RESPONSE.toString());
-					if (dequeue(node)){
+					if (dequeue(node)) {
 						// if the leader has received all acks, then prepare to send the next request
 						expected++;
-						if(isReadyToSend(expected)){
+						if (isReadyToSend(expected)) {
 							JSONObject proposal = queue.remove(expected);
-							if(proposal != null) {
+							if (proposal != null) {
 								proposal.put(MyDBClient.Keys.TYPE.toString(), MyDBFaultTolerantServerZK.Type.PROPOSAL.toString());
 								enqueue();
 								broadcastRequest(proposal);
@@ -400,6 +491,9 @@ public class MyDBFaultTolerantServerZK extends server.MyDBSingleServer {
 					log.log(Level.SEVERE, "{0} received ACKNOWLEDEMENT message from {1} which should not be here.",
 							new Object[]{this.myID, header.sndr});
 				}
+
+				//Update state in Zookeeper upon receive of ACKNOWLEDGEMENT type
+				updateZookeeperState(Type.ACKNOWLEDGEMENT.toString(), json);
 			} else {
 				log.log(Level.SEVERE, "{0} received unrecongonized message from {1} which should not be here.",
 						new Object[]{this.myID, header.sndr});
