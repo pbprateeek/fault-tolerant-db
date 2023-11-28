@@ -104,6 +104,8 @@ public class MyDBFaultTolerantServerZK extends server.MyDBSingleServer {
 	// Create a unique path for this server
 	String statePath = "/serverStates/";
 
+	CountDownLatch connectedSignal = new CountDownLatch(1);
+
 
 	/**
 	 * @param nodeConfig Server name/address configuration information read
@@ -153,9 +155,11 @@ public class MyDBFaultTolerantServerZK extends server.MyDBSingleServer {
 				public void process(WatchedEvent we) {
 					if (we.getState() == Watcher.Event.KeeperState.SyncConnected) {
 						System.out.println("Connected to ZooKeeper");
+						connectedSignal.countDown();
 					}
 				}
 			});
+			connectedSignal.await();
 		} catch (Exception e) {
 			e.printStackTrace();
 		}
@@ -175,12 +179,14 @@ public class MyDBFaultTolerantServerZK extends server.MyDBSingleServer {
 	}
 
 	public void runForLeader() throws KeeperException, InterruptedException {
-    // Ensure the election path exists
-    Stat stat = zookeeper.exists(electionPath, false);
-    if (stat == null) {
-        // Create the election path if it does not exist
-        zookeeper.create(electionPath, new byte[0], ZooDefs.Ids.OPEN_ACL_UNSAFE, CreateMode.PERSISTENT);
-    }
+		System.out.println("Leader Election started");
+
+		// Ensure the election path exists
+		Stat stat = zookeeper.exists(electionPath, false);
+		if (stat == null) {
+			// Create the election path if it does not exist
+			zookeeper.create(electionPath, new byte[0], ZooDefs.Ids.OPEN_ACL_UNSAFE, CreateMode.PERSISTENT);
+		}
 
 		String path = zookeeper.create(electionPath + "/server-", myID.getBytes(),
 				ZooDefs.Ids.OPEN_ACL_UNSAFE,
@@ -194,6 +200,7 @@ public class MyDBFaultTolerantServerZK extends server.MyDBSingleServer {
 			// This server is the leader
 			isLeader = true;
 			leader = myID;
+			System.out.println(leader + ": is the Leader");
 			handleNewLeader();
 		} else {
 			// This server is not the leader, watch the node with a smaller sequence number
@@ -203,7 +210,7 @@ public class MyDBFaultTolerantServerZK extends server.MyDBSingleServer {
 					// The node we are watching is deleted, try to become the leader again
 					try {
 						runForLeader();
-                } catch (KeeperException | InterruptedException e) {
+					} catch (KeeperException | InterruptedException e) {
 						throw new RuntimeException(e);
 					}
 				}
@@ -244,8 +251,6 @@ public class MyDBFaultTolerantServerZK extends server.MyDBSingleServer {
 			zookeeper.create("/serverStates", new byte[0], ZooDefs.Ids.OPEN_ACL_UNSAFE, CreateMode.PERSISTENT);
 		}
 	}
-
-
 
 
 	private void forwardStateToHandler(byte[] bytes) throws JSONException {
