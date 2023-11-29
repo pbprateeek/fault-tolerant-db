@@ -251,18 +251,20 @@ protected void verifyOrderConsistent(String table, Integer key,
 
 		tables[i] = new HashMap<Integer, ArrayList<Integer>>();
 		for(Row row : resultSets[i]) {
-			nonEmpty = true;
+			//nonEmpty = true;
 			// single key row mode with each row an events list
 			if(key!=null) {
 				tables[i].putIfAbsent(key, new ArrayList<Integer>());
 				tables[i].put(key, new ArrayList<Integer>(row.getList("events",
 						Integer.class)));
+				nonEmpty = !tables[i].get(key).isEmpty();
 			}
 			// entire table mode with each row a key:events_list pair
 			else {
 				int curKey = row.getInt(0);
 				tables[i].put(curKey,new ArrayList<Integer>(row.getList(1,
 						Integer.class)));
+				nonEmpty = !tables[i].get(curKey).isEmpty();
 			}
 		}
 		i++;

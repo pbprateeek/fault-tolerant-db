@@ -72,7 +72,7 @@ Your implementation must respect the following constraints, but these are not me
 
 # Getting started #
 
-Start by running your consistency-only replicated server (or using the [sample solution](https://bitbucket.org/distrsys/fault-tolerant-db/src/master/src/server/AVDBReplicatedServer.java) with [STUDENT_TESTING_MODE`=false`](https://bitbucket.org/distrsys/fault-tolerant-db/src/9a12b86469508854d641de52f19170ec6db712b5/test/GraderCommonSetup.java#lines-93)) by running GraderConsistency. You should see the old consistency-only tests pass. You should also see at least the first test in `GraderFaultTolerance` pass.
+Start by running your consistency-only replicated server (or using the [sample solution](https://bitbucket.org/distrsys/fault-tolerant-db/src/master/src/server/AVDBReplicatedServer.java) with [STUDENT_TESTING_MODE`=false`](https://bitbucket.org/distrsys/fault-tolerant-db/src/9a12b86469508854d641de52f19170ec6db712b5/test/GraderCommonSetup.java#lines-93)) by running GraderConsistency. You should see the old consistency-only tests pass. ~~You should also see at least the first test in `GraderFaultTolerance` pass~~.
 
 Next, revert `STUDENT_TESTING_MODE` to its default `true`, and verify that tests in [`GraderFaultTolerance`](https://bitbucket.org/distrsys/fault-tolerant-db/src/master/test/GraderFaultTolerance.java) fail. These tests fail because both `MyDBFaultTolerantServerZK` and `MyDBReplicableApp` throw "unimplemented" runtime exceptions, which you can see by disabling the default `PROCESS_MODE=true` flag so everything runs in a single JVM.
 
@@ -104,6 +104,7 @@ From here on, you need to read the documentation of each test, understand why it
 7. As always, the tests or config files provided are not intended to be exhaustive, and we may test your code with more stressful tests or configurations.
 8. Always remember to clear all state before every test run (e.g., paxos_logs/ in the GigaPaxos/RSM option and any files/tables/znodes you may have created in the other two options), otherwise you may be potentially carrying over bugs from previous runs.
 9. Always remember that a crash fault-tolerant consistent system must not make any changes to state without going through some kind of a consensus protocol, otherwise you will invariably end up violating safety.
+10. It is okay to assume that all application state will be contained in just the one table to which `Grader*` writes.
 
 More based on your FAQs.
 

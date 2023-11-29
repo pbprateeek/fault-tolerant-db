@@ -137,7 +137,8 @@ private synchronized static Process startServer(String node, boolean modeFT) thr
 	// gigapaxos apps needs to start with a clean slate as the app will
 	// be recovered from a recent checpoint and requests there onnwards
 	// rolled forward
-	if (GraderFaultTolerance.GIGAPAXOS_MODE) GraderCommonSetup.clearTable(node);
+	//if (GraderFaultTolerance.GIGAPAXOS_MODE)
+		GraderCommonSetup.clearTable(node);
 	serverPIDs.put(node, (p = startProcess(getServerStartCommand(node, modeFT)
 			, node)));
 	return p;
