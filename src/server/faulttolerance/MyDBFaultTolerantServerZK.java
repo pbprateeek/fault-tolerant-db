@@ -130,11 +130,17 @@ public class MyDBFaultTolerantServerZK extends server.MyDBSingleServer {
 				.build()).connect(myID);
 		log.log(Level.INFO, "Server {0} added cluster contact point",	new
 				Object[]{myID,});
-		// leader is elected as the first node in the nodeConfig
-		for(String node : nodeConfig.getNodeIDs()){
-			this.leader = node;
-			break;
-		}
+
+//		this.leader = fetchLeaderIdFromFileSystem();
+
+//		if(null == this.leader){
+//			System.out.println("leader is elected as the first node in the nodeConfig");
+//		// leader is elected as the first node in the nodeConfig
+//		for(String node : nodeConfig.getNodeIDs()){
+//			this.leader = node;
+//			break;
+//		}
+//		}
 		this.myID = myID;
 		this.stateLogFilePath = logDirectoryPath + "/serverStateLogs_" + myID + ".log";
 
@@ -156,20 +162,23 @@ public class MyDBFaultTolerantServerZK extends server.MyDBSingleServer {
 			zookeeper = new ZooKeeper(ZOOKEEPER_HOST, 5000, new Watcher() {
 				public void process(WatchedEvent we) {
 					if (we.getState() == Watcher.Event.KeeperState.SyncConnected) {
-						System.out.println("Connected to ZooKeeper");
+						System.out.println(myID + " : Connected to ZooKeeper");
 						connectedSignal.countDown();
 					}
 				}
 			});
 			connectedSignal.await();
+
+			// Watch the leader node for changes
+			watchLeaderNode();
+
+			// Run for leader
+			runForLeader();
+
+			// Print the recognized leader
+			System.out.println(myID + ": recognized " + leader + " as the Leader");
 		} catch (Exception e) {
 			e.printStackTrace();
-		}
-
-		try {
-			runForLeader();
-		} catch (KeeperException | InterruptedException e) {
-			throw new RuntimeException(e);
 		}
 	}
 
@@ -183,35 +192,82 @@ public class MyDBFaultTolerantServerZK extends server.MyDBSingleServer {
 			zookeeper.create(electionPath, new byte[0], ZooDefs.Ids.OPEN_ACL_UNSAFE, CreateMode.PERSISTENT);
 		}
 
+		// Create an ephemeral sequential node for this server
 		String path = zookeeper.create(electionPath + "/server-", myID.getBytes(),
-				ZooDefs.Ids.OPEN_ACL_UNSAFE,
-				CreateMode.EPHEMERAL_SEQUENTIAL);
+				ZooDefs.Ids.OPEN_ACL_UNSAFE, CreateMode.EPHEMERAL_SEQUENTIAL);
 
-		List<String> nodes = zookeeper.getChildren(electionPath, false);
-		Collections.sort(nodes);
+		while (true) {
+			List<String> nodes = zookeeper.getChildren(electionPath, false);
+			Collections.sort(nodes);
 
-		int index = nodes.indexOf(path.substring(electionPath.length() + 1));
-		if (index == 0) {
-			// This server is the leader
-			isLeader = true;
-			leader = myID;
-			System.out.println(leader + ": is the Leader");
-			retrieveAndProcessStateLogs();
+			int index = nodes.indexOf(path.substring(electionPath.length() + 1));
+			if (index == 0) {
+				// This server is the leader
+				isLeader = true;
+				leader = myID;
+				updateLeaderInfoInZooKeeper(leader);
+				retrieveAndProcessStateLogs();
+				break; // Exit the loop once leadership is established
+			} else {
+				// Watch the node with a smaller sequence number for deletion
+				String nodeToWatch = nodes.get(index - 1);
+				Stat watchStat = zookeeper.exists(electionPath + "/" + nodeToWatch, watchedEvent -> {
+					if (watchedEvent.getType() == Watcher.Event.EventType.NodeDeleted) {
+						try {
+							runForLeader(); // Re-run leader election
+						} catch (KeeperException | InterruptedException e) {
+							throw new RuntimeException(e);
+						}
+					}
+				});
+
+				if (watchStat == null) {
+					// The node we intended to watch does not exist, rerun leader election
+					continue;
+				}
+
+				break; // Successfully watching the previous node, exit loop
+			}
+		}
+	}
+
+
+	private void updateLeaderInfoInZooKeeper(String leaderId) throws KeeperException, InterruptedException {
+		// Path for the leader information znode
+		String leaderInfoPath = "/leader_info";
+
+		// Check if the node exists and create it if not
+		Stat stat = zookeeper.exists(leaderInfoPath, false);
+		if (stat == null) {
+			zookeeper.create(leaderInfoPath, leaderId.getBytes(), ZooDefs.Ids.OPEN_ACL_UNSAFE, CreateMode.PERSISTENT);
 		} else {
-			// This server is not the leader, watch the node with a smaller sequence number
-			String nodeToWatch = nodes.get(index - 1);
-			zookeeper.exists(electionPath + "/" + nodeToWatch, watchedEvent -> {
-				if (watchedEvent.getType() == Watcher.Event.EventType.NodeDeleted) {
-					// The node we are watching is deleted, try to become the leader again
-					try {
-						runForLeader();
-					} catch (KeeperException | InterruptedException e) {
-						throw new RuntimeException(e);
+			zookeeper.setData(leaderInfoPath, leaderId.getBytes(), -1);
+		}
+	}
+
+	private void watchLeaderNode() {
+		String leaderInfoPath = "/leader_info";
+		try {
+			zookeeper.exists(leaderInfoPath, new Watcher() {
+				public void process(WatchedEvent event) {
+					if (event.getType() == Watcher.Event.EventType.NodeDataChanged) {
+						try {
+							byte[] leaderData = zookeeper.getData(leaderInfoPath, false, null);
+							if (leaderData != null && leaderData.length > 0) {
+								leader = new String(leaderData);
+								System.out.println("New leader recognized: " + leader);
+							}
+						} catch (Exception e) {
+							e.printStackTrace();
+						}
 					}
 				}
 			});
+		} catch (Exception e) {
+			e.printStackTrace();
 		}
 	}
+
 
 	public void retrieveAndProcessStateLogs() {
 		Path logDir = Paths.get(logDirectoryPath);
@@ -316,14 +372,11 @@ public class MyDBFaultTolerantServerZK extends server.MyDBSingleServer {
 
 	private void updateServerState(String stateType, JSONObject json) {
 		try {
-			// Ensure the log directory exists
+
 			Files.createDirectories(Paths.get(logDirectoryPath));
-
-			// Prepare the log entry
 			String logEntry = stateType + ": " + json.toString() + System.lineSeparator();
-
-			// Write the log entry to the file
 			Files.write(Paths.get(stateLogFilePath), logEntry.getBytes(), StandardOpenOption.APPEND, StandardOpenOption.CREATE);
+
 		} catch (IOException e) {
 			e.printStackTrace();
 		}
@@ -388,7 +441,7 @@ public class MyDBFaultTolerantServerZK extends server.MyDBSingleServer {
 	}
 
 	protected void handleMessageFromServer(byte[] bytes, NIOHeader header) {
-//		System.out.println("In handleMessageFromServer" + leader + ": is the Leader");
+		System.out.println("In handleMessageFromServer: " + myID + " sees " + leader + "as the leader");
 //		System.out.println("In handleMessageFromServer" + myID + ": received the message");
 
 		// deserialize the request
