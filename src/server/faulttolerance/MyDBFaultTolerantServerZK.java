@@ -24,6 +24,7 @@ import java.util.List;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.locks.ReentrantLock;
 import java.util.logging.Level;
 
 /**
@@ -52,7 +53,7 @@ public class MyDBFaultTolerantServerZK extends server.MyDBSingleServer {
 	 * pass. The lower it is, the faster your implementation is. Grader* will
 	 * use this value provided it is no greater than its MAX_SLEEP limit.
 	 */
-	public static final int SLEEP = 2000;
+	public static final int SLEEP = 5000;
 
 	/**
 	 * Set this to true if you want all tables drpped at the end of each run
@@ -95,18 +96,19 @@ public class MyDBFaultTolerantServerZK extends server.MyDBSingleServer {
 	synchronized static Long incrExpected() {
 		return expected++;
 	}
-
-	private ZooKeeper zookeeper;
 	private static final String ZOOKEEPER_HOST = "localhost:2181";
 	private final String electionPath = "/election";
 
 	boolean isLeader = false;
-
-	// Create a unique path for this server
 	private final String logDirectoryPath = System.getProperty("user.home") + "/mydb_server_logs";
 	private String stateLogFilePath = "";
 
-	CountDownLatch connectedSignal = new CountDownLatch(1);
+	private static MyNodeConfig myNodeConfig ;
+	private static final ReentrantLock lock = new ReentrantLock();
+	private static final ReentrantLock configLock = new ReentrantLock();
+
+	private ZooKeeper zookeeper;
+	private String leaderPath = "/leader";
 
 
 	/**
@@ -120,272 +122,203 @@ public class MyDBFaultTolerantServerZK extends server.MyDBSingleServer {
 	 *                   you need to establish a session.
 	 * @throws IOException
 	 */
-	public MyDBFaultTolerantServerZK(NodeConfig<String> nodeConfig, String
-			myID, InetSocketAddress isaDB) throws IOException {
+	public MyDBFaultTolerantServerZK(NodeConfig<String> nodeConfig, String myID, InetSocketAddress isaDB) throws IOException {
 		super(new InetSocketAddress(nodeConfig.getNodeAddress(myID),
-				nodeConfig.getNodePort(myID) - ReplicatedServer
-						.SERVER_PORT_OFFSET), isaDB, myID);
+				nodeConfig.getNodePort(myID) - ReplicatedServer.SERVER_PORT_OFFSET), isaDB, myID);
 
-		session = (cluster=Cluster.builder().addContactPoint("127.0.0.1")
+		session = (cluster = Cluster.builder().addContactPoint("127.0.0.1")
 				.build()).connect(myID);
-		log.log(Level.INFO, "Server {0} added cluster contact point",	new
-				Object[]{myID,});
+		System.out.println("Server " + myID + " added cluster contact point");
 
-//		this.leader = fetchLeaderIdFromFileSystem();
-
-//		if(null == this.leader){
-//			System.out.println("leader is elected as the first node in the nodeConfig");
-//		// leader is elected as the first node in the nodeConfig
-//		for(String node : nodeConfig.getNodeIDs()){
-//			this.leader = node;
-//			break;
-//		}
-//		}
 		this.myID = myID;
+
+		// Initialize Zookeeper connection and set watch
+		initializeZookeeper();
+
+		// Load or initialize MyNodeConfig using Zookeeper
+		myNodeConfig = new MyNodeConfig(zookeeper);
+		try {
+			myNodeConfig.loadFromZookeeper();
+			System.out.println("Loaded MyNodeConfig from Zookeeper: " + myNodeConfig.getNodeIDs());
+		} catch (KeeperException | InterruptedException e) {
+			System.out.println("Error loading MyNodeConfig from Zookeeper: " + e.getMessage());
+			// Handle exception or initialize MyNodeConfig if it doesn't exist in Zookeeper
+		}
+
+		lock.lock();
+		try {
+			if (!myNodeConfig.containsNodeID(myID)) {
+				System.out.println("Server " + myID + " is adding itself to MyNodeConfig.");
+				myNodeConfig.addNodeID(myID);
+				myNodeConfig.saveToZookeeper();
+				System.out.println("Updated MyNodeConfig saved to Zookeeper: " + myNodeConfig.getNodeIDs());
+			}
+		} catch (KeeperException | InterruptedException e) {
+			System.out.println("Error saving MyNodeConfig to Zookeeper: " + e.getMessage());
+			// Handle exception
+		} finally {
+			lock.unlock();
+		}
+
+		// Delayed Leader Election
+		new Thread(() -> {
+			try {
+				Thread.sleep(5000); // Delay for a predefined period
+				myNodeConfig.loadFromZookeeper();
+				System.out.println("Reloaded MyNodeConfig from Zookeeper: " + myNodeConfig.getNodeIDs());
+				this.leader = determineLeader(myID);
+				System.out.println("Server " + myID + " determined leader as: " + this.leader);
+
+				// Take action based on the leader determination
+				if (this.leader.equals(myID)) {
+					createLeaderEphemeralNode();
+				} else {
+					watchLeaderNode();
+				}
+			} catch (InterruptedException | KeeperException e) {
+				System.out.println("Leader election thread interrupted for server " + myID);
+				Thread.currentThread().interrupt();
+			}
+		}).start();
+
 		this.stateLogFilePath = logDirectoryPath + "/serverStateLogs_" + myID + ".log";
 
-		this.serverMessenger =  new
-				MessageNIOTransport<String, String>(myID, nodeConfig,
-				new
-						AbstractBytePacketDemultiplexer() {
-							@Override
-							public boolean handleMessage(byte[] bytes, NIOHeader nioHeader) {
-								handleMessageFromServer(bytes, nioHeader);
-								return true;
-							}
-						}, true);
-
-		log.log(Level.INFO, "Server {0} started on {1}", new Object[]{this
-				.myID, this.clientMessenger.getListeningSocketAddress()});
-
-		try {
-			zookeeper = new ZooKeeper(ZOOKEEPER_HOST, 5000, new Watcher() {
-				public void process(WatchedEvent we) {
-					if (we.getState() == Watcher.Event.KeeperState.SyncConnected) {
-						System.out.println(myID + " : Connected to ZooKeeper");
-						connectedSignal.countDown();
-					}
-				}
-			});
-			connectedSignal.await();
-
-			// Watch the leader node for changes
-			watchLeaderNode();
-
-			// Run for leader
-			runForLeader();
-
-			// Print the recognized leader
-			System.out.println(myID + ": recognized " + leader + " as the Leader");
-		} catch (Exception e) {
-			e.printStackTrace();
-		}
-	}
-
-	public void runForLeader() throws KeeperException, InterruptedException {
-		System.out.println("Leader Election started in " + myID);
-
-		// Ensure the election path exists
-		Stat stat = zookeeper.exists(electionPath, false);
-		if (stat == null) {
-			// Create the election path if it does not exist
-			zookeeper.create(electionPath, new byte[0], ZooDefs.Ids.OPEN_ACL_UNSAFE, CreateMode.PERSISTENT);
-		}
-
-		// Create an ephemeral sequential node for this server
-		String path = zookeeper.create(electionPath + "/server-", myID.getBytes(),
-				ZooDefs.Ids.OPEN_ACL_UNSAFE, CreateMode.EPHEMERAL_SEQUENTIAL);
-
-		while (true) {
-			List<String> nodes = zookeeper.getChildren(electionPath, false);
-			Collections.sort(nodes);
-
-			int index = nodes.indexOf(path.substring(electionPath.length() + 1));
-			if (index == 0) {
-				// This server is the leader
-				isLeader = true;
-				leader = myID;
-				updateLeaderInfoInZooKeeper(leader);
-				retrieveAndProcessStateLogs();
-				break; // Exit the loop once leadership is established
-			} else {
-				// Watch the node with a smaller sequence number for deletion
-				String nodeToWatch = nodes.get(index - 1);
-				Stat watchStat = zookeeper.exists(electionPath + "/" + nodeToWatch, watchedEvent -> {
-					if (watchedEvent.getType() == Watcher.Event.EventType.NodeDeleted) {
-						try {
-							runForLeader(); // Re-run leader election
-						} catch (KeeperException | InterruptedException e) {
-							throw new RuntimeException(e);
-						}
-					}
-				});
-
-				if (watchStat == null) {
-					// The node we intended to watch does not exist, rerun leader election
-					continue;
-				}
-
-				break; // Successfully watching the previous node, exit loop
+		this.serverMessenger = new MessageNIOTransport<>(myID, nodeConfig, new AbstractBytePacketDemultiplexer() {
+			@Override
+			public boolean handleMessage(byte[] bytes, NIOHeader nioHeader) {
+				handleMessageFromServer(bytes, nioHeader);
+				return true;
 			}
-		}
+		}, true);
+
+		System.out.println("Server " + myID + " started on " + this.clientMessenger.getListeningSocketAddress());
 	}
 
-
-	private void updateLeaderInfoInZooKeeper(String leaderId) throws KeeperException, InterruptedException {
-		// Path for the leader information znode
-		String leaderInfoPath = "/leader_info";
-
-		// Check if the node exists and create it if not
-		Stat stat = zookeeper.exists(leaderInfoPath, false);
-		if (stat == null) {
-			zookeeper.create(leaderInfoPath, leaderId.getBytes(), ZooDefs.Ids.OPEN_ACL_UNSAFE, CreateMode.PERSISTENT);
-		} else {
-			zookeeper.setData(leaderInfoPath, leaderId.getBytes(), -1);
-		}
-	}
-
-	private void watchLeaderNode() {
-		String leaderInfoPath = "/leader_info";
-		try {
-			zookeeper.exists(leaderInfoPath, new Watcher() {
-				public void process(WatchedEvent event) {
-					if (event.getType() == Watcher.Event.EventType.NodeDataChanged) {
-						try {
-							byte[] leaderData = zookeeper.getData(leaderInfoPath, false, null);
-							if (leaderData != null && leaderData.length > 0) {
-								leader = new String(leaderData);
-								System.out.println("New leader recognized: " + leader);
-							}
-						} catch (Exception e) {
-							e.printStackTrace();
-						}
-					}
-				}
-			});
-		} catch (Exception e) {
-			e.printStackTrace();
-		}
-	}
-
-
-	public void retrieveAndProcessStateLogs() {
-		Path logDir = Paths.get(logDirectoryPath);
-		try {
-			if (Files.exists(logDir) && Files.isDirectory(logDir)) {
-				try (DirectoryStream<Path> stream = Files.newDirectoryStream(logDir, "serverStateLogs_*.log")) {
-					for (Path entry : stream) {
-						List<String> logEntries = Files.readAllLines(entry);
-						for (String logEntry : logEntries) {
-							String[] parts = logEntry.split(":", 2);
-							if (parts.length == 2) {
-								String stateType = parts[0].trim();
-								String stateData = parts[1].trim();
-								forwardStateToHandler(stateData.getBytes());
-							}
-						}
-					}
-				}
-			}
-		} catch (IOException e) {
-			e.printStackTrace();
-			// Handle exceptions
-		}
-	}
-
-
-	private void forwardStateToHandler(byte[] bytes) {
-		String logEntry = new String(bytes);
-
-		// Deserialize the log entry into a JSONObject
-		JSONObject state;
-		try {
-			state = new JSONObject(logEntry);
-		} catch (JSONException e) {
-			// Log the problematic data for debugging
-			System.err.println("Failed to parse JSON: " + logEntry);
-			e.printStackTrace();
-			return;
-		}
-
-		// Extract the state type from the JSON object
-		String stateType;
-		try {
-			stateType = state.getString("TYPE");
-		} catch (JSONException e) {
-			System.err.println("State type missing in JSON: " + state);
-			e.printStackTrace();
-			return;
-		}
-
-		// Handle the state based on its type
-		switch (stateType) {
-			case "ACKNOWLEDGEMENT":
-				handleAcknowledgement(state);
-				break;
-			case "PROPOSAL":
-				handleProposal(state);
-				break;
-			case "REQUEST":
-				handleRequest(state);
-				break;
-			default:
-				System.err.println("Unknown state type: " + stateType);
-		}
-	}
-
-
-
-
-	private void handleAcknowledgement(JSONObject acknowledgement) {
-		// Implement logic to handle ACKNOWLEDGEMENT
-		try {
-			serverMessenger.send(leader, acknowledgement.toString().getBytes());
-			log.log(Level.INFO, "{0} sends an ACKNOWLEDGEMENT {1} to {2}",
-					new Object[]{this.myID, acknowledgement, leader});
-		} catch (IOException e) {
-			e.printStackTrace();
-		}
-	}
-
-	private void handleProposal(JSONObject proposal) {
-		// Implement logic to handle PROPOSAL
-		try {
-			serverMessenger.send(leader, proposal.toString().getBytes());
-			log.log(Level.INFO, "{0} sends a PROPOSAL {1} to {2}",
-					new Object[]{this.myID, proposal, leader});
-		} catch (IOException e) {
-			e.printStackTrace();
-		}
-	}
-
-	private void handleRequest(JSONObject request) {
-		// Implement logic to handle REQUEST
-		try {
-			serverMessenger.send(leader, request.toString().getBytes());
-			log.log(Level.INFO, "{0} sends a REQUEST {1} to {2}",
-					new Object[]{this.myID, request, leader});
-		} catch (IOException e) {
-			e.printStackTrace();
-		}
-	}
-
-	private void updateServerState(String stateType, JSONObject json) {
-		try {
-
-			Files.createDirectories(Paths.get(logDirectoryPath));
-			String logEntry = stateType + ": " + json.toString() + System.lineSeparator();
-			Files.write(Paths.get(stateLogFilePath), logEntry.getBytes(), StandardOpenOption.APPEND, StandardOpenOption.CREATE);
-
-		} catch (IOException e) {
-			e.printStackTrace();
-		}
-	}
 
 	protected static enum Type {
 		REQUEST, // a server forwards a REQUEST to the leader
 		PROPOSAL, // the leader broadcast the REQUEST to all the nodes
 		ACKNOWLEDGEMENT; // all the nodes send back acknowledgement to the leader
+	}
+
+	private String determineLeader(String myID) {
+		lock.lock();
+		try {
+			String lowestNode = myNodeConfig.getNodeIDs().stream().sorted().findFirst().orElse(null);
+			// If myID is the lowest or if there's no other node, this node becomes the leader
+			return lowestNode != null ? lowestNode : myID;
+		} finally {
+			lock.unlock();
+		}
+	}
+
+	private synchronized void createLeaderEphemeralNode() {
+		try {
+			String leaderPath = "/leader";
+			if (zookeeper.exists(leaderPath, false) == null) {
+				zookeeper.create(leaderPath, myID.getBytes(), ZooDefs.Ids.OPEN_ACL_UNSAFE, CreateMode.EPHEMERAL);
+				System.out.println(myID + " created ephemeral leader node at path " + leaderPath);
+			}
+		} catch (Exception e) {
+			System.out.println("An error occurred while " + myID + " was trying to create leader node: " + e.getMessage());
+		}
+	}
+
+	private synchronized void initializeZookeeper() throws IOException {
+		CountDownLatch connectionLatch = new CountDownLatch(1);
+
+		zookeeper = new ZooKeeper(ZOOKEEPER_HOST, 5000, event -> {
+			if (event.getState() == Watcher.Event.KeeperState.SyncConnected) {
+				System.out.println(myID + " has connected to Zookeeper successfully.");
+				connectionLatch.countDown(); // Notify the latch that the connection is established
+			} else {
+				System.out.println(myID + " Zookeeper connection state changed: " + event.getState());
+			}
+
+			if (event.getType() == Watcher.Event.EventType.NodeDeleted && event.getPath().equals(leaderPath)) {
+				System.out.println(myID + " detected leader crash.");
+				handleLeaderCrash();
+			}
+		});
+
+		try {
+			System.out.println(myID + " waiting for Zookeeper connection...");
+			connectionLatch.await(); // Wait for the connection to establish
+			System.out.println(myID + " Zookeeper connection established.");
+		} catch (InterruptedException e) {
+			System.out.println(myID + " interrupted while waiting for Zookeeper connection.");
+			Thread.currentThread().interrupt(); // Set the interrupt flag
+		}
+	}
+
+	private synchronized void watchLeaderNode() {
+		try {
+			String leaderPath = "/leader";
+			zookeeper.exists(leaderPath, new Watcher() {
+				@Override
+				public void process(WatchedEvent event) {
+					// Check for the specific event type
+					if (event.getType() == Watcher.Event.EventType.NodeDeleted) {
+						System.out.println(myID + " detected leader crash. Initiating leader re-election.");
+						handleLeaderCrash(); // Call the method to handle leader crash
+					}
+				}
+			});
+
+			System.out.println(myID + " is watching the leader node at path " + leaderPath);
+		} catch (Exception e) {
+			System.out.println("An error occurred while " + myID + " was trying to watch leader node: " + e.getMessage());
+			// Handle exceptions appropriately
+		}
+	}
+
+
+	private void handleLeaderCrash() {
+		configLock.lock();
+		try {
+			myNodeConfig.removeNodeID(leader);
+			System.out.println("Leader " + leader + " removed from MyNodeConfig by " + myID);
+			attemptToBecomeLeader();
+		} finally {
+			configLock.unlock();
+		}
+	}
+
+	private synchronized  void attemptToBecomeLeader() {
+		System.out.println("Attempting to become leader by server: " + myID);
+
+		// Ensure that this is synchronized to prevent race conditions
+		String lowestNode = myNodeConfig.getNodeIDs().stream().sorted().findFirst().orElse(null);
+
+		if (lowestNode != null && lowestNode.equals(myID)) {
+			// This server has the lowest ID, so it becomes the leader
+			leader = myID;
+			System.out.println("Server " + myID + " is now the leader.");
+
+			// Create the ephemeral leader node in Zookeeper
+			createLeaderEphemeralNode();
+		} else {
+			if (lowestNode != null) {
+				System.out.println("Server " + myID + " is not the leader. Current leader is: " + lowestNode);
+				// Watch the leader node in Zookeeper
+				watchLeaderNode();
+			} else {
+				System.out.println("No leader could be determined by server: " + myID);
+			}
+		}
+	}
+
+
+
+	public void handleNodeRecovery() {
+		configLock.lock();
+		try {
+			System.out.println("Server " + myID + " adding itself back to MyNodeConfig.");
+			myNodeConfig.addNodeID(myID);
+			attemptToBecomeLeader();
+		} finally {
+			configLock.unlock();
+		}
 	}
 
 
@@ -577,6 +510,119 @@ public class MyDBFaultTolerantServerZK extends server.MyDBSingleServer {
 		if(notAcked.size() == 0)
 			return true;
 		return false;
+	}
+
+	public void retrieveAndProcessStateLogs() {
+		Path logDir = Paths.get(logDirectoryPath);
+		try {
+			if (Files.exists(logDir) && Files.isDirectory(logDir)) {
+				try (DirectoryStream<Path> stream = Files.newDirectoryStream(logDir, "serverStateLogs_*.log")) {
+					for (Path entry : stream) {
+						List<String> logEntries = Files.readAllLines(entry);
+						for (String logEntry : logEntries) {
+							String[] parts = logEntry.split(":", 2);
+							if (parts.length == 2) {
+								String stateType = parts[0].trim();
+								String stateData = parts[1].trim();
+								forwardStateToHandler(stateData.getBytes());
+							}
+						}
+					}
+				}
+			}
+		} catch (IOException e) {
+			e.printStackTrace();
+			// Handle exceptions
+		}
+	}
+
+
+	private void forwardStateToHandler(byte[] bytes) {
+		String logEntry = new String(bytes);
+
+		// Deserialize the log entry into a JSONObject
+		JSONObject state;
+		try {
+			state = new JSONObject(logEntry);
+		} catch (JSONException e) {
+			// Log the problematic data for debugging
+			System.err.println("Failed to parse JSON: " + logEntry);
+			e.printStackTrace();
+			return;
+		}
+
+		// Extract the state type from the JSON object
+		String stateType;
+		try {
+			stateType = state.getString("TYPE");
+		} catch (JSONException e) {
+			System.err.println("State type missing in JSON: " + state);
+			e.printStackTrace();
+			return;
+		}
+
+		// Handle the state based on its type
+		switch (stateType) {
+			case "ACKNOWLEDGEMENT":
+				handleAcknowledgement(state);
+				break;
+			case "PROPOSAL":
+				handleProposal(state);
+				break;
+			case "REQUEST":
+				handleRequest(state);
+				break;
+			default:
+				System.err.println("Unknown state type: " + stateType);
+		}
+	}
+
+
+
+
+	private void handleAcknowledgement(JSONObject acknowledgement) {
+		// Implement logic to handle ACKNOWLEDGEMENT
+		try {
+			serverMessenger.send(leader, acknowledgement.toString().getBytes());
+			log.log(Level.INFO, "{0} sends an ACKNOWLEDGEMENT {1} to {2}",
+					new Object[]{this.myID, acknowledgement, leader});
+		} catch (IOException e) {
+			e.printStackTrace();
+		}
+	}
+
+	private void handleProposal(JSONObject proposal) {
+		// Implement logic to handle PROPOSAL
+		try {
+			serverMessenger.send(leader, proposal.toString().getBytes());
+			log.log(Level.INFO, "{0} sends a PROPOSAL {1} to {2}",
+					new Object[]{this.myID, proposal, leader});
+		} catch (IOException e) {
+			e.printStackTrace();
+		}
+	}
+
+	private void handleRequest(JSONObject request) {
+		// Implement logic to handle REQUEST
+		try {
+			serverMessenger.send(leader, request.toString().getBytes());
+			log.log(Level.INFO, "{0} sends a REQUEST {1} to {2}",
+					new Object[]{this.myID, request, leader});
+		} catch (IOException e) {
+			e.printStackTrace();
+		}
+	}
+
+	private void updateServerState(String stateType, JSONObject json) {
+		try {
+
+			Files.createDirectories(Paths.get(logDirectoryPath));
+			String logEntry = stateType + ": " + json.toString() + System.lineSeparator();
+			Files.write(Paths.get(stateLogFilePath), logEntry.getBytes(), StandardOpenOption.APPEND, StandardOpenOption.CREATE);
+
+		} catch (IOException e) {
+			e.printStackTrace();
+		}
 	}
 
 

@@ -318,6 +318,19 @@ public void test35_TwoServerCrash() throws IOException, InterruptedException {
 @GradedTest(name = "test36_OneServerRecoveryMultipleRequests()", max_score = 3)
 public void test36_OneServerRecoveryMultipleRequests() throws IOException,
 		InterruptedException {
+	Set<String> crashed = new HashSet<String>();
+	String victim = ServerFailureRecoveryManager.killRandomServer();
+
+	ServerFailureRecoveryManager.killServer(victim);
+	crashed.add(victim);
+
+	String victim2 = (String) Util.getRandomOtherThan(serverMap.keySet(),
+			victim);
+
+	ServerFailureRecoveryManager.killServer(victim2);
+
+	crashed.add(victim);
+
 	String first = crashed.iterator().next();
 	ServerFailureRecoveryManager.recoverServer(first);
 	Thread.sleep(PER_SERVER_BOOTSTRAP_TIME);

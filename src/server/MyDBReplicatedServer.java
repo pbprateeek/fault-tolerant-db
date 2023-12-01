@@ -8,11 +8,15 @@ import edu.umass.cs.nio.MessageNIOTransport;
 import edu.umass.cs.nio.interfaces.NodeConfig;
 import edu.umass.cs.nio.nioutils.NIOHeader;
 import edu.umass.cs.nio.nioutils.NodeConfigUtils;
+import org.apache.zookeeper.*;
+import org.apache.zookeeper.data.Stat;
 import org.json.JSONException;
 import org.json.JSONObject;
 
 import java.io.IOException;
 import java.net.InetSocketAddress;
+import java.util.Collections;
+import java.util.List;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.logging.Level;
@@ -45,6 +49,12 @@ public class MyDBReplicatedServer extends SingleServer {
     synchronized static Long incrExpected() {
         return expected++;
     }
+
+    private ZooKeeper zookeeper;
+    private static final String ZOOKEEPER_HOST = "localhost:2181";
+    private final String electionPath = "/election";
+
+    boolean isLeader = false;
 
 
     /**
@@ -84,6 +94,59 @@ public class MyDBReplicatedServer extends SingleServer {
         log.log(Level.INFO, "Server {0} started on {1}", new Object[]{this
                 .myID, this.clientMessenger.getListeningSocketAddress()});
 
+        try {
+            zookeeper = new ZooKeeper(ZOOKEEPER_HOST, 3000, new Watcher() {
+                public void process(WatchedEvent we) {
+                    if (we.getState() == Watcher.Event.KeeperState.SyncConnected) {
+                        System.out.println("Connected to ZooKeeper");
+                        try {
+                            runForLeader();
+                        } catch (KeeperException | InterruptedException e) {
+                            throw new RuntimeException(e);
+                        }
+                    }
+                }
+            });
+        } catch (Exception e) {
+            e.printStackTrace();
+        }
+
+    }
+
+    public void runForLeader() throws KeeperException, InterruptedException {
+        // Ensure the election path exists
+        Stat stat = zookeeper.exists(electionPath, false);
+        if (stat == null) {
+            // Create the election path if it does not exist
+            zookeeper.create(electionPath, new byte[0], ZooDefs.Ids.OPEN_ACL_UNSAFE, CreateMode.PERSISTENT);
+        }
+
+        String path = zookeeper.create(electionPath + "/server-", myID.getBytes(),
+                ZooDefs.Ids.OPEN_ACL_UNSAFE,
+                CreateMode.EPHEMERAL_SEQUENTIAL);
+
+        List<String> nodes = zookeeper.getChildren(electionPath, false);
+        Collections.sort(nodes);
+
+        int index = nodes.indexOf(path.substring(electionPath.length() + 1));
+        if (index == 0) {
+            // This server is the leader
+            isLeader = true;
+            leader = myID;
+        } else {
+            // This server is not the leader, watch the node with a smaller sequence number
+            String nodeToWatch = nodes.get(index - 1);
+            zookeeper.exists(electionPath + "/" + nodeToWatch, watchedEvent -> {
+                if (watchedEvent.getType() == Watcher.Event.EventType.NodeDeleted) {
+                    // The node we are watching is deleted, try to become the leader again
+                    try {
+                        runForLeader();
+                    } catch (KeeperException | InterruptedException e) {
+                        throw new RuntimeException(e);
+                    }
+                }
+            });
+        }
     }
 
     protected static enum Type {

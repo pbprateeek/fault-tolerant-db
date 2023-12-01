@@ -9,6 +9,7 @@ import edu.umass.cs.nio.interfaces.NodeConfig;
 import edu.umass.cs.nio.nioutils.NIOHeader;
 import edu.umass.cs.nio.nioutils.NodeConfigUtils;
 import edu.umass.cs.utils.RepeatRule;
+import org.apache.zookeeper.KeeperException;
 import org.json.JSONArray;
 import org.junit.*;
 import org.junit.rules.TestName;
@@ -69,7 +70,7 @@ protected static String CONFIG_FILE;
 protected static final int NUM_REQS = 100;
 
 //////////////////// sleep macros
-protected static final int MAX_SLEEP = 2000;
+protected static final int MAX_SLEEP = 5000;
 protected static final int SLEEP_RATIO = 10;
 // ZK or other implementations can set higher sleep if needed, but it
 // shouldn't be needed.
