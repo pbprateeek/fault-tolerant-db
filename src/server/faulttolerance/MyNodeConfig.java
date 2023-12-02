@@ -13,6 +13,7 @@ public class MyNodeConfig {
     private List<String> nodeIDs;
     private ZooKeeper zookeeper;
     private String configPath = "/MyNodeConfig";
+    private static final Object zookeeperLock = new Object();
 
     public MyNodeConfig(ZooKeeper zookeeper) {
         this.zookeeper = zookeeper;
@@ -38,12 +39,21 @@ public class MyNodeConfig {
     }
 
     // Method to save to Zookeeper
-    public synchronized void saveToZookeeper() throws KeeperException, InterruptedException {
-        byte[] data = String.join(",", nodeIDs).getBytes();
-        if (zookeeper.exists(configPath, false) == null) {
-            zookeeper.create(configPath, data, ZooDefs.Ids.OPEN_ACL_UNSAFE, CreateMode.PERSISTENT);
-        } else {
-            zookeeper.setData(configPath, data, -1);
+    public void saveToZookeeper() throws KeeperException, InterruptedException {
+        synchronized(zookeeperLock) {
+            byte[] data = String.join(",", nodeIDs).getBytes();
+            String configPath = "/MyNodeConfig";
+
+            if (zookeeper.exists(configPath, false) == null) {
+                try {
+                    zookeeper.create(configPath, data, ZooDefs.Ids.OPEN_ACL_UNSAFE, CreateMode.PERSISTENT);
+                } catch (KeeperException.NodeExistsException e) {
+                    System.out.println("Node already exists, updating instead: " + e.getMessage());
+                    zookeeper.setData(configPath, data, -1); // Update if node already exists
+                }
+            } else {
+                zookeeper.setData(configPath, data, -1); // Update the existing node
+            }
         }
     }
 

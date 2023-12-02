@@ -139,9 +139,9 @@ public class MyDBFaultTolerantServerZK extends server.MyDBSingleServer {
 		myNodeConfig = new MyNodeConfig(zookeeper);
 		try {
 			myNodeConfig.loadFromZookeeper();
-			System.out.println("Loaded MyNodeConfig from Zookeeper: " + myNodeConfig.getNodeIDs());
+			 System.out.println("Loaded MyNodeConfig from Zookeeper: " + myNodeConfig.getNodeIDs());
 		} catch (KeeperException | InterruptedException e) {
-			System.out.println("Error loading MyNodeConfig from Zookeeper: " + e.getMessage());
+			 System.out.println("Error loading MyNodeConfig from Zookeeper: " + e.getMessage());
 			// Handle exception or initialize MyNodeConfig if it doesn't exist in Zookeeper
 		}
 
@@ -150,12 +150,17 @@ public class MyDBFaultTolerantServerZK extends server.MyDBSingleServer {
 			if (!myNodeConfig.containsNodeID(myID)) {
 				System.out.println("Server " + myID + " is adding itself to MyNodeConfig.");
 				myNodeConfig.addNodeID(myID);
-				myNodeConfig.saveToZookeeper();
-				System.out.println("Updated MyNodeConfig saved to Zookeeper: " + myNodeConfig.getNodeIDs());
+				try {
+					myNodeConfig.saveToZookeeper();
+					System.out.println("Updated MyNodeConfig saved to Zookeeper: " + myNodeConfig.getNodeIDs());
+				} catch (KeeperException.NodeExistsException e) {
+					System.out.println("Node already exists, will try updating: " + e.getMessage());
+					myNodeConfig.saveToZookeeper(); // Retry saving, which will update the node
+				}
 			}
 		} catch (KeeperException | InterruptedException e) {
 			System.out.println("Error saving MyNodeConfig to Zookeeper: " + e.getMessage());
-			// Handle exception
+			// Handle other exceptions
 		} finally {
 			lock.unlock();
 		}
@@ -173,8 +178,19 @@ public class MyDBFaultTolerantServerZK extends server.MyDBSingleServer {
 				if (this.leader.equals(myID)) {
 					createLeaderEphemeralNode();
 				} else {
+					System.out.println("watchLeaderNode() called from constructor in " + myID);
 					watchLeaderNode();
 				}
+
+				createServerEphemeralNode();
+				// Set watch on other servers' nodes
+				for (String serverID : myNodeConfig.getNodeIDs()) {
+					if (!serverID.equals(myID)) {
+						watchServerNode(serverID);
+					}
+				}
+
+
 			} catch (InterruptedException | KeeperException e) {
 				System.out.println("Leader election thread interrupted for server " + myID);
 				Thread.currentThread().interrupt();
@@ -224,21 +240,43 @@ public class MyDBFaultTolerantServerZK extends server.MyDBSingleServer {
 		}
 	}
 
+	private void createServerEphemeralNode() {
+		String serversParentPath = "/servers";
+		String serverNodePath = serversParentPath + "/" + myID;
+
+		try {
+			// Ensure parent node exists
+			if (zookeeper.exists(serversParentPath, false) == null) {
+				zookeeper.create(serversParentPath, new byte[0], ZooDefs.Ids.OPEN_ACL_UNSAFE, CreateMode.PERSISTENT);
+			}
+
+			// Create the server's ephemeral node
+			zookeeper.create(serverNodePath, myID.getBytes(), ZooDefs.Ids.OPEN_ACL_UNSAFE, CreateMode.EPHEMERAL);
+			System.out.println(myID + " created its ephemeral node at path " + serverNodePath);
+		} catch (KeeperException.NodeExistsException e) {
+			System.out.println("Node already exists: " + e.getMessage());
+		} catch (Exception e) {
+			System.out.println("An error occurred while " + myID + " was trying to create its ephemeral node: " + e.getMessage());
+		}
+	}
+
+
+
 	private synchronized void initializeZookeeper() throws IOException {
 		CountDownLatch connectionLatch = new CountDownLatch(1);
 
-		zookeeper = new ZooKeeper(ZOOKEEPER_HOST, 5000, event -> {
+		zookeeper = new ZooKeeper(ZOOKEEPER_HOST, 3000, event -> {
 			if (event.getState() == Watcher.Event.KeeperState.SyncConnected) {
-				System.out.println(myID + " has connected to Zookeeper successfully.");
+				 System.out.println(myID + " has connected to Zookeeper successfully.");
 				connectionLatch.countDown(); // Notify the latch that the connection is established
 			} else {
-				System.out.println(myID + " Zookeeper connection state changed: " + event.getState());
+				 System.out.println(myID + " Zookeeper connection state changed: " + event.getState());
 			}
 
-			if (event.getType() == Watcher.Event.EventType.NodeDeleted && event.getPath().equals(leaderPath)) {
-				System.out.println(myID + " detected leader crash.");
-				handleLeaderCrash();
-			}
+//			if (event.getType() == Watcher.Event.EventType.NodeDeleted && event.getPath().equals(leaderPath)) {
+//				 System.out.println(myID + " detected leader crash.");
+//				handleLeaderCrash();
+//			}
 		});
 
 		try {
@@ -251,40 +289,76 @@ public class MyDBFaultTolerantServerZK extends server.MyDBSingleServer {
 		}
 	}
 
-	private synchronized void watchLeaderNode() {
+	private void watchLeaderNode() {
+		String leaderPath = "/leader";
 		try {
-			String leaderPath = "/leader";
-			zookeeper.exists(leaderPath, new Watcher() {
-				@Override
-				public void process(WatchedEvent event) {
-					// Check for the specific event type
-					if (event.getType() == Watcher.Event.EventType.NodeDeleted) {
-						System.out.println(myID + " detected leader crash. Initiating leader re-election.");
-						handleLeaderCrash(); // Call the method to handle leader crash
-					}
+			zookeeper.exists(leaderPath, event -> {
+				if (event.getType() == Watcher.Event.EventType.NodeDeleted) {
+					System.out.println(myID + " detected leader crash. Initiating leader re-election.");
+					handleLeaderCrash();
 				}
+				// Re-register the watch
+				//watchLeaderNode();
 			});
-
-			System.out.println(myID + " is watching the leader node at path " + leaderPath);
 		} catch (Exception e) {
-			System.out.println("An error occurred while " + myID + " was trying to watch leader node: " + e.getMessage());
-			// Handle exceptions appropriately
+			System.out.println("An error occurred while setting watch on leader node: " + e.getMessage());
 		}
 	}
 
 
+
+	private void watchServerNode(String serverID) {
+		String serverNodePath = "/servers/" + serverID;
+		try {
+			zookeeper.exists(serverNodePath, event -> {
+				if (event.getType() == Watcher.Event.EventType.NodeDeleted) {
+					System.out.println("Detected crash of server " + serverID + ".");
+					handleServerCrash(serverID);
+				}
+				// Re-register the watch
+				//watchServerNode(serverID);
+			});
+		} catch (Exception e) {
+			System.out.println("An error occurred while " + myID + " was trying to watch server node: " + e.getMessage());
+		}
+	}
+
+
+
+
+
 	private void handleLeaderCrash() {
+		myNodeConfig.removeNodeID(leader);
+		System.out.println("Leader " + leader + " removed from MyNodeConfig by " + myID);
+
+		try {
+			myNodeConfig.saveToZookeeper();
+			System.out.println("MyNodeConfig updated in Zookeeper after removing leader " + leader);
+		} catch (KeeperException | InterruptedException e) {
+			System.out.println("Error updating MyNodeConfig in Zookeeper: " + e.getMessage());
+		}
+		attemptToBecomeLeader();
+		 
+	}
+
+	private void handleServerCrash(String crashedServerID) {
 		configLock.lock();
 		try {
-			myNodeConfig.removeNodeID(leader);
-			System.out.println("Leader " + leader + " removed from MyNodeConfig by " + myID);
+			myNodeConfig.removeNodeID(crashedServerID);
+			System.out.println("Server " + crashedServerID + " removed from MyNodeConfig by " + myID);
+
+			myNodeConfig.saveToZookeeper();
 			attemptToBecomeLeader();
+			System.out.println("MyNodeConfig updated in Zookeeper after removing " + crashedServerID);
+		} catch (KeeperException | InterruptedException e) {
+			System.out.println("Error updating MyNodeConfig in Zookeeper: " + e.getMessage());
 		} finally {
 			configLock.unlock();
 		}
 	}
 
-	private synchronized  void attemptToBecomeLeader() {
+
+	private void attemptToBecomeLeader() {
 		System.out.println("Attempting to become leader by server: " + myID);
 
 		// Ensure that this is synchronized to prevent race conditions
@@ -301,6 +375,7 @@ public class MyDBFaultTolerantServerZK extends server.MyDBSingleServer {
 			if (lowestNode != null) {
 				System.out.println("Server " + myID + " is not the leader. Current leader is: " + lowestNode);
 				// Watch the leader node in Zookeeper
+				System.out.println("watchLeaderNode() called from attemptToBecomeLeader in " + myID);
 				watchLeaderNode();
 			} else {
 				System.out.println("No leader could be determined by server: " + myID);
