@@ -96,7 +96,7 @@ public class MyDBFaultTolerantServerZK extends server.MyDBSingleServer {
 	private final String electionPath = "/election";
 
 	boolean isLeader = false;
-	private final String logDirectoryPath = System.getProperty("user.home") + "/mydb_server_logs";
+	private final String logDirectoryPath =  "/mydb_server_logs";
 	private String stateLogFilePath = "";
 
 	private static MyNodeConfig myNodeConfig ;
@@ -127,11 +127,11 @@ public class MyDBFaultTolerantServerZK extends server.MyDBSingleServer {
 		System.out.println("Server " + myID + " added cluster contact point");
 
 		this.myID = myID;
-
+/*
 		for(String node : nodeConfig.getNodeIDs()){
 			this.leader = node;
 			break;
-		}
+		}*/
 
 		// Initialize Zookeeper connection and set watch
 		initializeZookeeper();
@@ -189,9 +189,6 @@ public class MyDBFaultTolerantServerZK extends server.MyDBSingleServer {
 		}).start();
 
 		this.stateLogFilePath = logDirectoryPath + "/serverStateLogs_" + myID + ".log";
-		if (shouldRecoverState()) {
-			retrieveAndProcessStateLogs();
-		}
 
 		this.serverMessenger = new MessageNIOTransport<>(myID, nodeConfig, new AbstractBytePacketDemultiplexer() {
 			@Override
@@ -200,6 +197,9 @@ public class MyDBFaultTolerantServerZK extends server.MyDBSingleServer {
 				return true;
 			}
 		}, true);
+		if (shouldRecoverState()) {
+			retrieveAndProcessStateLogs();
+		}
 
 		System.out.println("Server " + myID + " started on " + this.clientMessenger.getListeningSocketAddress());
 	}
@@ -454,7 +454,6 @@ public class MyDBFaultTolerantServerZK extends server.MyDBSingleServer {
 	}
 
 	protected void handleMessageFromServer(byte[] bytes, NIOHeader header) {
-		System.out.println("Server Message: " + myID + " sees " + leader + "as the leader");
 //		System.out.println("In handleMessageFromServer" + myID + ": received the message");
 
 		// deserialize the request

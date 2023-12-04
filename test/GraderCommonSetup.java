@@ -1,3 +1,4 @@
+import client.AVDBClient;
 import client.Client;
 import client.MyDBClient;
 import com.datastax.driver.core.Cluster;
@@ -119,7 +120,7 @@ public static void setup(boolean gpMode) throws IOException,
 					ReplicatedServer.SERVER_PREFIX :
 					PaxosConfig.DEFAULT_SERVER_PREFIX), (!gpMode ? 0 :
 					PaxosConfig.getClientPortOffset()));
-	client = STUDENT_TESTING_MODE ? new MyDBClient(nodeConfigClient)
+	client = STUDENT_TESTING_MODE ? new AVDBClient(nodeConfigClient)
 
 			// instructor client
 			: (Client) getInstance(getConstructor("client.AVDBClient",
