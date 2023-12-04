@@ -1,19 +1,27 @@
 package server.faulttolerance;
 
-import com.datastax.driver.core.*;
+import com.datastax.driver.core.Cluster;
+import com.datastax.driver.core.ColumnDefinitions;
+import com.datastax.driver.core.ResultSet;
+import com.datastax.driver.core.Session;
 import com.datastax.driver.core.exceptions.DriverException;
 import edu.umass.cs.gigapaxos.interfaces.Replicable;
 import edu.umass.cs.gigapaxos.interfaces.Request;
 import edu.umass.cs.gigapaxos.paxospackets.RequestPacket;
 import edu.umass.cs.nio.interfaces.IntegerPacketType;
+import edu.umass.cs.nio.interfaces.NodeConfig;
+import edu.umass.cs.nio.nioutils.NIOHeader;
+import edu.umass.cs.nio.nioutils.NodeConfigUtils;
 import edu.umass.cs.reconfiguration.reconfigurationutils.RequestParseException;
 import org.json.JSONArray;
 import org.json.JSONException;
 import org.json.JSONObject;
 
 import java.io.IOException;
+import java.net.InetSocketAddress;
 import java.util.*;
 import java.util.stream.Collectors;
+import java.util.stream.IntStream;
 
 /**
  * This class should implement your {@link Replicable} database app if you wish
@@ -136,48 +144,35 @@ public class MyDBReplicableAppGP implements Replicable {
 	 * @return
 	 */
 	@Override
-	public String checkpoint(String s) throws DriverException {
-		String cql = "SELECT keyspace_name, table_name FROM system_schema.tables WHERE keyspace_name = ?;";
-		PreparedStatement preparedStatement = session.prepare(cql);
-		BoundStatement boundStatement = preparedStatement.bind(keyspace);
-		ResultSet result = session.execute(boundStatement);
-
-		List<TableQueryList> tableQueries = new ArrayList<>();
-		for (Row row : result) {
-			final String table = row.getString("table_name");
-			ResultSet records = session.execute("SELECT * from " + keyspace + "." + table + ";");
-			List<String> queries = new ArrayList<>();
-			for (Row record : records) {
-				List<ColumnDefinitions.Definition> columnDefs = record.getColumnDefinitions().asList();
-				String columnNames = columnDefs.stream()
-						.map(ColumnDefinitions.Definition::getName)
-						.collect(Collectors.joining(","));
-
-				String values = columnDefs.stream()
-						.map(def -> formatValueForCQL(record, def))
-						.collect(Collectors.joining(","));
-
-				queries.add("INSERT INTO " + keyspace + "." + table + " (" + columnNames + ") VALUES (" + values + ");");
-			}
-			tableQueries.add(new TableQueryList(table, queries));
-		}
+	public String checkpoint(String s) {
+		// TODO:
+		ResultSet result = session.execute("SELECT keyspace_name, table_name FROM system_schema.tables WHERE keyspace_name = "+keyspace+";");
+		List<TableQueryList> tableQueries = result.all()
+				.stream()
+				.map(row -> row.getString(1))
+				.map(table -> {
+					ResultSet records = session.execute("SELECT * from " + keyspace + "." + table + ";");
+					List<String> queries = records.all()
+							.stream()
+							.map(row -> {
+								List<ColumnDefinitions.Definition> columnDefs = row.getColumnDefinitions().asList();
+								String columnNames = columnDefs.stream()
+										.map(ColumnDefinitions.Definition::getName)
+										.collect(Collectors.joining(","));
+								String values = columnDefs.stream()
+										.map(ColumnDefinitions.Definition::getName)
+										.map(row::getString)
+										.collect(Collectors.joining(","));
+								return "INSERT INTO "+keyspace+"."+table+" (" + columnNames + ") VALUES (" + values + ");";
+							})
+							.collect(Collectors.toList());
+					return new TableQueryList(table, queries);
+				})
+				.collect(Collectors.toList());
 		bufferQueries = new LinkedList<>();
+		//throw new RuntimeException("Not yet implemented");
 		return new JSONArray(tableQueries).toString();
 	}
-
-	private String formatValueForCQL(Row record, ColumnDefinitions.Definition def) {
-		DataType type = def.getType();
-		String columnName = def.getName();
-
-		if (type.equals(DataType.cint()) || type.equals(DataType.bigint()) || type.equals(DataType.cdouble()) || type.equals(DataType.cfloat())) {
-			return record.getObject(columnName).toString();
-		} else if (type.equals(DataType.text()) || type.equals(DataType.varchar())) {
-			return "'" + record.getString(columnName).replace("'", "''") + "'";
-		} else {
-			return "'" + record.getObject(columnName).toString().replace("'", "''") + "'";
-		}
-	}
-
 
 	/**
 	 * Refer documentation of {@link Replicable#restore(String, String)}
@@ -188,32 +183,33 @@ public class MyDBReplicableAppGP implements Replicable {
 	 */
 	@Override
 	public boolean restore(String s, String s1) {
-		if ("{}".equals(s1)) {
+		// TODO:
+		if("{}".equals(s1)){
 			return true;
 		}
 		try {
 			JSONArray jsonArray = new JSONArray(s1);
-			for (int i = 0; i < jsonArray.length(); i++) {
+			for(int i=0;i<jsonArray.length();i++) {
 				JSONObject tableQueryList = jsonArray.getJSONObject(i);
 				String tableName = tableQueryList.getString("table");
-				session.execute("TRUNCATE " + keyspace + "." + tableName + ";");
-
+				session.execute("TRUNCATE "+keyspace+"."+tableName+";");
 				JSONArray queries = tableQueryList.getJSONArray("queries");
-				for (int k = 0; k < queries.length(); k++) {
+				for(int k=0;k<queries.length();k++) {
 					session.execute(queries.getString(k));
 				}
 			}
-
-			while (!bufferQueries.isEmpty()) {
-				session.execute(bufferQueries.poll());
+			while(!bufferQueries.isEmpty()){
+				session.execute(bufferQueries.peek());
+				bufferQueries.remove();
 			}
-
 			return true;
-		} catch (DriverException | JSONException e) {
+		}
+		catch (Exception e){
 			return false;
 		}
-    }
+		//throw new RuntimeException("Not yet implemented");
 
+	}
 
 
 	/**
