@@ -1,18 +1,23 @@
 package server.faulttolerance;
 
-import com.datastax.driver.core.Cluster;
+import com.datastax.driver.core.*;
 import edu.umass.cs.gigapaxos.interfaces.Replicable;
 import edu.umass.cs.gigapaxos.interfaces.Request;
+import edu.umass.cs.gigapaxos.paxospackets.RequestPacket;
 import edu.umass.cs.nio.interfaces.IntegerPacketType;
 import edu.umass.cs.nio.interfaces.NodeConfig;
 import edu.umass.cs.nio.nioutils.NIOHeader;
 import edu.umass.cs.nio.nioutils.NodeConfigUtils;
 import edu.umass.cs.reconfiguration.reconfigurationutils.RequestParseException;
+import org.json.JSONArray;
+import org.json.JSONException;
+import org.json.JSONObject;
 
 import java.io.IOException;
 import java.net.InetSocketAddress;
-import java.util.HashSet;
-import java.util.Set;
+import java.util.*;
+import java.util.stream.Collectors;
+import java.util.stream.IntStream;
 
 /**
  * This class should implement your {@link Replicable} database app if you wish
@@ -39,6 +44,16 @@ import java.util.Set;
  */
 public class MyDBReplicableAppGP implements Replicable {
 
+	private class TableQueryList{
+		public String table;
+		public List<String> queries;
+
+		public TableQueryList(String table, List<String> queries){
+			this.table = table;
+			this.queries = queries;
+		}
+	}
+
 	/**
 	 * Set this value to as small a value with which you can get tests to still
 	 * pass. The lower it is, the faster your implementation is. Grader* will
@@ -47,6 +62,13 @@ public class MyDBReplicableAppGP implements Replicable {
 	 * is not necessarily better, so don't sweat speed. Focus on safety.
 	 */
 	public static final int SLEEP = 1000;
+	final private Session session;
+	final private Cluster cluster;
+	final private String keyspace;
+
+	private Queue<String> bufferQueries;
+
+
 
 	/**
 	 * All Gigapaxos apps must either support a no-args constructor or a
@@ -60,8 +82,13 @@ public class MyDBReplicableAppGP implements Replicable {
 	 * @throws IOException
 	 */
 	public MyDBReplicableAppGP(String[] args) throws IOException {
+		keyspace = args[0];
+		session = (cluster=Cluster.builder().addContactPoint("127.0.0.1")
+				.build()).connect(keyspace);
+		bufferQueries = new LinkedList<>();
+
 		// TODO: setup connection to the data store and keyspace
-		throw new RuntimeException("Not yet implemented");
+		//throw new RuntimeException("Not yet implemented");
 	}
 
 	/**
@@ -78,7 +105,8 @@ public class MyDBReplicableAppGP implements Replicable {
 	@Override
 	public boolean execute(Request request, boolean b) {
 		// TODO: submit request to data store
-		throw new RuntimeException("Not yet implemented");
+		return this.execute(request);
+		//throw new RuntimeException("Not yet implemented");
 	}
 
 	/**
@@ -91,7 +119,15 @@ public class MyDBReplicableAppGP implements Replicable {
 	@Override
 	public boolean execute(Request request) {
 		// TODO: execute the request by sending it to the data store
-		throw new RuntimeException("Not yet implemented");
+		try{
+			session.execute(((RequestPacket)request).getRequestValue());
+			bufferQueries.add(((RequestPacket)request).getRequestValue());
+			return true;
+		}
+		catch (Exception e){
+			return false;
+		}
+		//throw new RuntimeException("Not yet implemented");
 	}
 
 	/**
@@ -103,7 +139,36 @@ public class MyDBReplicableAppGP implements Replicable {
 	@Override
 	public String checkpoint(String s) {
 		// TODO:
-		throw new RuntimeException("Not yet implemented");
+		String cql = "SELECT keyspace_name, table_name FROM system_schema.tables WHERE keyspace_name = ?;";
+		PreparedStatement preparedStatement = session.prepare(cql);
+		BoundStatement boundStatement = preparedStatement.bind(keyspace);
+
+		ResultSet result = session.execute(boundStatement);
+		List<TableQueryList> tableQueries = result.all()
+				.stream()
+				.map(row -> row.getString(1))
+				.map(table -> {
+					ResultSet records = session.execute("SELECT * from " + keyspace + "." + table + ";");
+					List<String> queries = records.all()
+							.stream()
+							.map(row -> {
+								List<ColumnDefinitions.Definition> columnDefs = row.getColumnDefinitions().asList();
+								String columnNames = columnDefs.stream()
+										.map(ColumnDefinitions.Definition::getName)
+										.collect(Collectors.joining(","));
+								String values = columnDefs.stream()
+										.map(ColumnDefinitions.Definition::getName)
+										.map(row::getString)
+										.collect(Collectors.joining(","));
+								return "INSERT INTO "+keyspace+"."+table+" (" + columnNames + ") VALUES (" + values + ");";
+							})
+							.toList();
+					return new TableQueryList(table, queries);
+				})
+				.toList();
+		bufferQueries = new LinkedList<>();
+		//throw new RuntimeException("Not yet implemented");
+		return new JSONArray(tableQueries).toString();
 	}
 
 	/**
@@ -116,7 +181,27 @@ public class MyDBReplicableAppGP implements Replicable {
 	@Override
 	public boolean restore(String s, String s1) {
 		// TODO:
-		throw new RuntimeException("Not yet implemented");
+		try {
+			JSONArray jsonArray = new JSONArray(s1);
+			for(int i=0;i<jsonArray.length();i++) {
+				JSONObject tableQueryList = jsonArray.getJSONObject(i);
+				String tableName = tableQueryList.getString("table");
+				session.execute("TRUNCATE "+keyspace+"."+tableName+";");
+				JSONArray queries = tableQueryList.getJSONArray("queries");
+				for(int k=0;k<queries.length();k++) {
+					session.execute(queries.getString(k));
+				}
+			}
+			while(!bufferQueries.isEmpty()){
+				session.execute(bufferQueries.peek());
+				bufferQueries.remove();
+			}
+			return true;
+		}
+		catch (Exception e){
+			return false;
+		}
+		//throw new RuntimeException("Not yet implemented");
 
 	}
 
