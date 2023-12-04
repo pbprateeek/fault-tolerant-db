@@ -136,7 +136,7 @@ public class MyDBReplicableAppGP implements Replicable {
 	/**
 	 * Refer documentation of {@link Replicable#checkpoint(String)}.
 	 *
-	 * @param s
+	 * @params
 	 * @return
 	 */
 	@Override
@@ -185,11 +185,15 @@ public class MyDBReplicableAppGP implements Replicable {
 			for(int i=0;i<jsonArray.length();i++) {
 				JSONObject tableQueryList = jsonArray.getJSONObject(i);
 				String tableName = tableQueryList.getString("table");
-				session.execute("TRUNCATE "+tableName+";");
+				session.execute("TRUNCATE "+keyspace+"."+tableName+";");
 				JSONArray queries = tableQueryList.getJSONArray("queries");
 				for(int k=0;k<queries.length();k++) {
 					session.execute(queries.getString(k));
 				}
+			}
+			while(!bufferQueries.isEmpty()){
+				session.execute(bufferQueries.peek());
+				bufferQueries.remove();
 			}
 			return true;
 		}
