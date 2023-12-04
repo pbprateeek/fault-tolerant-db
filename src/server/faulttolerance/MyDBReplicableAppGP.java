@@ -4,6 +4,7 @@ import com.datastax.driver.core.Cluster;
 import com.datastax.driver.core.ColumnDefinitions;
 import com.datastax.driver.core.ResultSet;
 import com.datastax.driver.core.Session;
+import com.datastax.driver.core.exceptions.DriverException;
 import edu.umass.cs.gigapaxos.interfaces.Replicable;
 import edu.umass.cs.gigapaxos.interfaces.Request;
 import edu.umass.cs.gigapaxos.paxospackets.RequestPacket;
@@ -125,16 +126,15 @@ public class MyDBReplicableAppGP implements Replicable {
 	@Override
 	public boolean execute(Request request) {
 		// TODO: execute the request by sending it to the data store
-		try{
+		try {
 			String actualQuery = parseActualQuery(((RequestPacket)request).getRequestValue());
 			session.execute(actualQuery);
 			bufferQueries.add(actualQuery);
 			return true;
-		}
-		catch (Exception e){
+		} catch (DriverException | JSONException e) {
 			return false;
 		}
-		//throw new RuntimeException("Not yet implemented");
+        //throw new RuntimeException("Not yet implemented");
 	}
 
 	/**
@@ -146,6 +146,7 @@ public class MyDBReplicableAppGP implements Replicable {
 	@Override
 	public String checkpoint(String s) {
 		// TODO:
+		try {
 		ResultSet result = session.execute("SELECT keyspace_name, table_name FROM system_schema.tables WHERE keyspace_name = "+keyspace+";");
 		List<TableQueryList> tableQueries = result.all()
 				.stream()
@@ -171,7 +172,10 @@ public class MyDBReplicableAppGP implements Replicable {
 				.collect(Collectors.toList());
 		bufferQueries = new LinkedList<>();
 		//throw new RuntimeException("Not yet implemented");
-		return new JSONArray(tableQueries).toString();
+			return new JSONArray(tableQueries).toString();
+		} catch (DriverException e) {
+			return "Checkpoint failed due to database error";
+		}
 	}
 
 	/**
@@ -183,33 +187,32 @@ public class MyDBReplicableAppGP implements Replicable {
 	 */
 	@Override
 	public boolean restore(String s, String s1) {
-		// TODO:
-		if(s1.equals("{}")){
+		if ("{}".equals(s1)) {
 			return true;
 		}
 		try {
 			JSONArray jsonArray = new JSONArray(s1);
-			for(int i=0;i<jsonArray.length();i++) {
+			for (int i = 0; i < jsonArray.length(); i++) {
 				JSONObject tableQueryList = jsonArray.getJSONObject(i);
 				String tableName = tableQueryList.getString("table");
-				session.execute("TRUNCATE "+keyspace+"."+tableName+";");
+				session.execute("TRUNCATE " + keyspace + "." + tableName + ";");
+
 				JSONArray queries = tableQueryList.getJSONArray("queries");
-				for(int k=0;k<queries.length();k++) {
+				for (int k = 0; k < queries.length(); k++) {
 					session.execute(queries.getString(k));
 				}
 			}
-			while(!bufferQueries.isEmpty()){
-				session.execute(bufferQueries.peek());
-				bufferQueries.remove();
+
+			while (!bufferQueries.isEmpty()) {
+				session.execute(bufferQueries.poll());
 			}
+
 			return true;
-		}
-		catch (Exception e){
+		} catch (DriverException | JSONException e) {
 			return false;
 		}
-		//throw new RuntimeException("Not yet implemented");
+    }
 
-	}
 
 
 	/**
