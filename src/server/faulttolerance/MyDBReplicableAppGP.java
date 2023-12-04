@@ -136,16 +136,15 @@ public class MyDBReplicableAppGP implements Replicable {
 	 * @return
 	 */
 	@Override
-	public String checkpoint(String s) {
-		// TODO:
+	public String checkpoint(String s) throws DriverException {
 		String cql = "SELECT keyspace_name, table_name FROM system_schema.tables WHERE keyspace_name = ?;";
 		PreparedStatement preparedStatement = session.prepare(cql);
 		BoundStatement boundStatement = preparedStatement.bind(keyspace);
-
 		ResultSet result = session.execute(boundStatement);
+
 		List<TableQueryList> tableQueries = new ArrayList<>();
 		for (Row row : result) {
-			final String table = row.getString(1);
+			final String table = row.getString("table_name");
 			ResultSet records = session.execute("SELECT * from " + keyspace + "." + table + ";");
 			List<String> queries = new ArrayList<>();
 			for (Row record : records) {
@@ -153,17 +152,32 @@ public class MyDBReplicableAppGP implements Replicable {
 				String columnNames = columnDefs.stream()
 						.map(ColumnDefinitions.Definition::getName)
 						.collect(Collectors.joining(","));
+
 				String values = columnDefs.stream()
-						.map(def -> "'" + record.getString(def.getName()) + "'")
+						.map(def -> formatValueForCQL(record, def))
 						.collect(Collectors.joining(","));
+
 				queries.add("INSERT INTO " + keyspace + "." + table + " (" + columnNames + ") VALUES (" + values + ");");
 			}
 			tableQueries.add(new TableQueryList(table, queries));
 		}
 		bufferQueries = new LinkedList<>();
-		//throw new RuntimeException("Not yet implemented");
 		return new JSONArray(tableQueries).toString();
 	}
+
+	private String formatValueForCQL(Row record, ColumnDefinitions.Definition def) {
+		DataType type = def.getType();
+		String columnName = def.getName();
+
+		if (type.equals(DataType.cint()) || type.equals(DataType.bigint()) || type.equals(DataType.cdouble()) || type.equals(DataType.cfloat())) {
+			return record.getObject(columnName).toString();
+		} else if (type.equals(DataType.text()) || type.equals(DataType.varchar())) {
+			return "'" + record.getString(columnName).replace("'", "''") + "'";
+		} else {
+			return "'" + record.getObject(columnName).toString().replace("'", "''") + "'";
+		}
+	}
+
 
 	/**
 	 * Refer documentation of {@link Replicable#restore(String, String)}
