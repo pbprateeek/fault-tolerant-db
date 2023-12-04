@@ -112,6 +112,9 @@ public class MyDBReplicableAppGP implements Replicable {
 		//throw new RuntimeException("Not yet implemented");
 	}
 
+	private String parseActualQuery(String requestValue) throws JSONException{
+		return new JSONObject(requestValue).getString("QV");
+	}
 	/**
 	 * Refer documentation of
 	 * {@link edu.umass.cs.gigapaxos.interfaces.Application#execute(Request)}
@@ -123,8 +126,9 @@ public class MyDBReplicableAppGP implements Replicable {
 	public boolean execute(Request request) {
 		// TODO: execute the request by sending it to the data store
 		try{
-			session.execute(((RequestPacket)request).getRequestValue());
-			bufferQueries.add(((RequestPacket)request).getRequestValue());
+			String actualQuery = parseActualQuery(((RequestPacket)request).getRequestValue());
+			session.execute(actualQuery);
+			bufferQueries.add(actualQuery);
 			return true;
 		}
 		catch (Exception e){
@@ -180,6 +184,9 @@ public class MyDBReplicableAppGP implements Replicable {
 	@Override
 	public boolean restore(String s, String s1) {
 		// TODO:
+		if(s1.equals("{}")){
+			return true;
+		}
 		try {
 			JSONArray jsonArray = new JSONArray(s1);
 			for(int i=0;i<jsonArray.length();i++) {
