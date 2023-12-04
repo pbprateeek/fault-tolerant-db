@@ -131,7 +131,7 @@ public class MyDBReplicableAppGP implements Replicable {
 			session.execute(actualQuery);
 			bufferQueries.add(actualQuery);
 			return true;
-		} catch (Exception e) {
+		} catch (DriverException | JSONException e) {
 			return false;
 		}
         //throw new RuntimeException("Not yet implemented");
