@@ -1,27 +1,19 @@
 package server.faulttolerance;
 
-import com.datastax.driver.core.Cluster;
-import com.datastax.driver.core.ColumnDefinitions;
-import com.datastax.driver.core.ResultSet;
-import com.datastax.driver.core.Session;
+import com.datastax.driver.core.*;
 import com.datastax.driver.core.exceptions.DriverException;
 import edu.umass.cs.gigapaxos.interfaces.Replicable;
 import edu.umass.cs.gigapaxos.interfaces.Request;
 import edu.umass.cs.gigapaxos.paxospackets.RequestPacket;
 import edu.umass.cs.nio.interfaces.IntegerPacketType;
-import edu.umass.cs.nio.interfaces.NodeConfig;
-import edu.umass.cs.nio.nioutils.NIOHeader;
-import edu.umass.cs.nio.nioutils.NodeConfigUtils;
 import edu.umass.cs.reconfiguration.reconfigurationutils.RequestParseException;
 import org.json.JSONArray;
 import org.json.JSONException;
 import org.json.JSONObject;
 
 import java.io.IOException;
-import java.net.InetSocketAddress;
 import java.util.*;
 import java.util.stream.Collectors;
-import java.util.stream.IntStream;
 
 /**
  * This class should implement your {@link Replicable} database app if you wish
@@ -147,31 +139,34 @@ public class MyDBReplicableAppGP implements Replicable {
 	public String checkpoint(String s) {
 		// TODO:
 		try {
-		ResultSet result = session.execute("SELECT keyspace_name, table_name FROM system_schema.tables WHERE keyspace_name = "+keyspace+";");
-		List<TableQueryList> tableQueries = result.all()
-				.stream()
-				.map(row -> row.getString(1))
-				.map(table -> {
-					ResultSet records = session.execute("SELECT * from " + keyspace + "." + table + ";");
-					List<String> queries = records.all()
-							.stream()
-							.map(row -> {
-								List<ColumnDefinitions.Definition> columnDefs = row.getColumnDefinitions().asList();
-								String columnNames = columnDefs.stream()
-										.map(ColumnDefinitions.Definition::getName)
-										.collect(Collectors.joining(","));
-								String values = columnDefs.stream()
-										.map(ColumnDefinitions.Definition::getName)
-										.map(row::getString)
-										.collect(Collectors.joining(","));
-								return "INSERT INTO "+keyspace+"."+table+" (" + columnNames + ") VALUES (" + values + ");";
-							})
-							.collect(Collectors.toList());
-					return new TableQueryList(table, queries);
-				})
-				.collect(Collectors.toList());
-		bufferQueries = new LinkedList<>();
-		//throw new RuntimeException("Not yet implemented");
+			String cql = "SELECT keyspace_name, table_name FROM system_schema.tables WHERE keyspace_name = ?;";
+			PreparedStatement preparedStatement = session.prepare(cql);
+			BoundStatement boundStatement = preparedStatement.bind(keyspace);
+			ResultSet result = session.execute(boundStatement);
+			List<TableQueryList> tableQueries = result.all()
+					.stream()
+					.map(row -> row.getString(1))
+					.map(table -> {
+						ResultSet records = session.execute("SELECT * from " + keyspace + "." + table + ";");
+						List<String> queries = records.all()
+								.stream()
+								.map(row -> {
+									List<ColumnDefinitions.Definition> columnDefs = row.getColumnDefinitions().asList();
+									String columnNames = columnDefs.stream()
+											.map(ColumnDefinitions.Definition::getName)
+											.collect(Collectors.joining(","));
+									String values = columnDefs.stream()
+											.map(ColumnDefinitions.Definition::getName)
+											.map(row::getString)
+											.collect(Collectors.joining(","));
+									return "INSERT INTO " + keyspace + "." + table + " (" + columnNames + ") VALUES (" + values + ");";
+								})
+								.collect(Collectors.toList());
+						return new TableQueryList(table, queries);
+					})
+					.collect(Collectors.toList());
+			bufferQueries = new LinkedList<>();
+			//throw new RuntimeException("Not yet implemented");
 			return new JSONArray(tableQueries).toString();
 		} catch (DriverException e) {
 			return "Checkpoint failed due to database error";
