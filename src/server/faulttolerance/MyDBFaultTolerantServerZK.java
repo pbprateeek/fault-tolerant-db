@@ -128,6 +128,11 @@ public class MyDBFaultTolerantServerZK extends server.MyDBSingleServer {
 
 		this.myID = myID;
 
+		for(String node : nodeConfig.getNodeIDs()){
+			this.leader = node;
+			break;
+		}
+
 		// Initialize Zookeeper connection and set watch
 		initializeZookeeper();
 
@@ -184,6 +189,9 @@ public class MyDBFaultTolerantServerZK extends server.MyDBSingleServer {
 		}).start();
 
 		this.stateLogFilePath = logDirectoryPath + "/serverStateLogs_" + myID + ".log";
+		if (shouldRecoverState()) {
+			retrieveAndProcessStateLogs();
+		}
 
 		this.serverMessenger = new MessageNIOTransport<>(myID, nodeConfig, new AbstractBytePacketDemultiplexer() {
 			@Override
@@ -195,6 +203,12 @@ public class MyDBFaultTolerantServerZK extends server.MyDBSingleServer {
 
 		System.out.println("Server " + myID + " started on " + this.clientMessenger.getListeningSocketAddress());
 	}
+
+	private boolean shouldRecoverState() {
+		Path logFilePath = Paths.get(stateLogFilePath);
+		return Files.exists(logFilePath) && logFilePath.toFile().length() > 0;
+	}
+
 
 
 	protected static enum Type {
