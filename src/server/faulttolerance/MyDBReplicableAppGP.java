@@ -138,39 +138,31 @@ public class MyDBReplicableAppGP implements Replicable {
 	@Override
 	public String checkpoint(String s) {
 		// TODO:
-		try {
-			String cql = "SELECT keyspace_name, table_name FROM system_schema.tables WHERE keyspace_name = ?;";
-			PreparedStatement preparedStatement = session.prepare(cql);
-			BoundStatement boundStatement = preparedStatement.bind(keyspace);
-			ResultSet result = session.execute(boundStatement);
-			List<TableQueryList> tableQueries = result.all()
-					.stream()
-					.map(row -> row.getString(1))
-					.map(table -> {
-						ResultSet records = session.execute("SELECT * from " + keyspace + "." + table + ";");
-						List<String> queries = records.all()
-								.stream()
-								.map(row -> {
-									List<ColumnDefinitions.Definition> columnDefs = row.getColumnDefinitions().asList();
-									String columnNames = columnDefs.stream()
-											.map(ColumnDefinitions.Definition::getName)
-											.collect(Collectors.joining(","));
-									String values = columnDefs.stream()
-											.map(ColumnDefinitions.Definition::getName)
-											.map(row::getString)
-											.collect(Collectors.joining(","));
-									return "INSERT INTO " + keyspace + "." + table + " (" + columnNames + ") VALUES (" + values + ");";
-								})
-								.collect(Collectors.toList());
-						return new TableQueryList(table, queries);
-					})
-					.collect(Collectors.toList());
-			bufferQueries = new LinkedList<>();
-			//throw new RuntimeException("Not yet implemented");
-			return new JSONArray(tableQueries).toString();
-		} catch (DriverException e) {
-			return "";
+		String cql = "SELECT keyspace_name, table_name FROM system_schema.tables WHERE keyspace_name = ?;";
+		PreparedStatement preparedStatement = session.prepare(cql);
+		BoundStatement boundStatement = preparedStatement.bind(keyspace);
+
+		ResultSet result = session.execute(boundStatement);
+		List<TableQueryList> tableQueries = new ArrayList<>();
+		for (Row row : result) {
+			final String table = row.getString(1);
+			ResultSet records = session.execute("SELECT * from " + keyspace + "." + table + ";");
+			List<String> queries = new ArrayList<>();
+			for (Row record : records) {
+				List<ColumnDefinitions.Definition> columnDefs = record.getColumnDefinitions().asList();
+				String columnNames = columnDefs.stream()
+						.map(ColumnDefinitions.Definition::getName)
+						.collect(Collectors.joining(","));
+				String values = columnDefs.stream()
+						.map(def -> "'" + record.getString(def.getName()) + "'")
+						.collect(Collectors.joining(","));
+				queries.add("INSERT INTO " + keyspace + "." + table + " (" + columnNames + ") VALUES (" + values + ");");
+			}
+			tableQueries.add(new TableQueryList(table, queries));
 		}
+		bufferQueries = new LinkedList<>();
+		//throw new RuntimeException("Not yet implemented");
+		return new JSONArray(tableQueries).toString();
 	}
 
 	/**
