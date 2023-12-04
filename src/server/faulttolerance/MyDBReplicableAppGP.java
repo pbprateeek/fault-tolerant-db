@@ -169,7 +169,7 @@ public class MyDBReplicableAppGP implements Replicable {
 			//throw new RuntimeException("Not yet implemented");
 			return new JSONArray(tableQueries).toString();
 		} catch (DriverException e) {
-			return "Checkpoint failed due to database error";
+			return "";
 		}
 	}
 
