@@ -165,10 +165,10 @@ public class MyDBReplicableAppGP implements Replicable {
 										.collect(Collectors.joining(","));
 								return "INSERT INTO "+keyspace+"."+table+" (" + columnNames + ") VALUES (" + values + ");";
 							})
-							.toList();
+							.collect(Collectors.toList());
 					return new TableQueryList(table, queries);
 				})
-				.toList();
+				.collect(Collectors.toList());
 		bufferQueries = new LinkedList<>();
 		//throw new RuntimeException("Not yet implemented");
 		return new JSONArray(tableQueries).toString();
