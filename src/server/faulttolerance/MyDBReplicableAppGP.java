@@ -5,19 +5,13 @@ import edu.umass.cs.gigapaxos.interfaces.Replicable;
 import edu.umass.cs.gigapaxos.interfaces.Request;
 import edu.umass.cs.gigapaxos.paxospackets.RequestPacket;
 import edu.umass.cs.nio.interfaces.IntegerPacketType;
-import edu.umass.cs.nio.interfaces.NodeConfig;
-import edu.umass.cs.nio.nioutils.NIOHeader;
-import edu.umass.cs.nio.nioutils.NodeConfigUtils;
 import edu.umass.cs.reconfiguration.reconfigurationutils.RequestParseException;
 import org.json.JSONArray;
-import org.json.JSONException;
 import org.json.JSONObject;
 
 import java.io.IOException;
-import java.net.InetSocketAddress;
 import java.util.*;
 import java.util.stream.Collectors;
-import java.util.stream.IntStream;
 
 /**
  * This class should implement your {@link Replicable} database app if you wish
@@ -144,28 +138,23 @@ public class MyDBReplicableAppGP implements Replicable {
 		BoundStatement boundStatement = preparedStatement.bind(keyspace);
 
 		ResultSet result = session.execute(boundStatement);
-		List<TableQueryList> tableQueries = result.all()
-				.stream()
-				.map(row -> row.getString(1))
-				.map(table -> {
-					ResultSet records = session.execute("SELECT * from " + keyspace + "." + table + ";");
-					List<String> queries = records.all()
-							.stream()
-							.map(row -> {
-								List<ColumnDefinitions.Definition> columnDefs = row.getColumnDefinitions().asList();
-								String columnNames = columnDefs.stream()
-										.map(ColumnDefinitions.Definition::getName)
-										.collect(Collectors.joining(","));
-								String values = columnDefs.stream()
-										.map(ColumnDefinitions.Definition::getName)
-										.map(row::getString)
-										.collect(Collectors.joining(","));
-								return "INSERT INTO "+keyspace+"."+table+" (" + columnNames + ") VALUES (" + values + ");";
-							})
-							.toList();
-					return new TableQueryList(table, queries);
-				})
-				.toList();
+		List<TableQueryList> tableQueries = new ArrayList<>();
+		for (Row row : result) {
+			final String table = row.getString(1);
+			ResultSet records = session.execute("SELECT * from " + keyspace + "." + table + ";");
+			List<String> queries = new ArrayList<>();
+			for (Row record : records) {
+				List<ColumnDefinitions.Definition> columnDefs = record.getColumnDefinitions().asList();
+				String columnNames = columnDefs.stream()
+						.map(ColumnDefinitions.Definition::getName)
+						.collect(Collectors.joining(","));
+				String values = columnDefs.stream()
+						.map(def -> "'" + record.getString(def.getName()) + "'")
+						.collect(Collectors.joining(","));
+				queries.add("INSERT INTO " + keyspace + "." + table + " (" + columnNames + ") VALUES (" + values + ");");
+			}
+			tableQueries.add(new TableQueryList(table, queries));
+		}
 		bufferQueries = new LinkedList<>();
 		//throw new RuntimeException("Not yet implemented");
 		return new JSONArray(tableQueries).toString();
